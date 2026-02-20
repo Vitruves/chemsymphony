@@ -26,12 +26,9 @@ def _comb_filter_vectorized(audio: np.ndarray, delay_samples: int,
         end = min(start + delay_samples, n)
         length = end - start
         feedback = output[start - delay_samples:start - delay_samples + length]
-        # LP damping: simple one-pole filter on feedback
+        # LP damping: one-pole filter via lfilter
         if damping > 0:
-            damped = feedback.copy()
-            for j in range(1, length):
-                damped[j] = (1.0 - damping) * damped[j] + damping * damped[j - 1]
-            feedback = damped
+            feedback = scipy_signal.lfilter([1.0 - damping], [1.0, -damping], feedback)
         output[start:end] = audio[start:end] + gain * feedback
 
     return output
@@ -182,9 +179,9 @@ def apply_vibrato(audio: np.ndarray, sr: int, rate: float = 5.0,
     n = len(audio)
     t = np.arange(n) / sr
     mod = depth * sr * np.sin(2 * np.pi * rate * t)
-    indices = np.arange(n, dtype=np.float64) + mod
-    indices = np.clip(indices, 0, n - 1).astype(int)
-    return audio[indices]
+    fractional_indices = np.arange(n, dtype=np.float64) + mod
+    fractional_indices = np.clip(fractional_indices, 0, n - 1)
+    return np.interp(fractional_indices, np.arange(n), audio)
 
 
 # ---------------------------------------------------------------------------
@@ -202,15 +199,16 @@ def apply_chorus(audio: np.ndarray, sr: int, rate: float = 1.5,
     t = np.arange(n) / sr
     result = audio.copy()
 
+    x_indices = np.arange(n, dtype=np.float64)
     for v in range(voices):
         # Each voice has a different LFO phase
         phase = 2 * np.pi * v / voices
         delay_mod = depth * sr * (0.5 + 0.5 * np.sin(2 * np.pi * rate * t + phase))
         # Base delay to avoid negative indices
         base_delay = int(depth * sr) + 10
-        indices = np.arange(n, dtype=np.float64) - base_delay - delay_mod
-        indices = np.clip(indices, 0, n - 1).astype(int)
-        result = result + audio[indices] * (mix / voices)
+        fractional_indices = x_indices - base_delay - delay_mod
+        fractional_indices = np.clip(fractional_indices, 0, n - 1)
+        result = result + np.interp(fractional_indices, x_indices, audio) * (mix / voices)
 
     return result
 

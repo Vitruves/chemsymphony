@@ -118,6 +118,24 @@ def _lowpass(signal: np.ndarray, cutoff: float, sr: int,
     return filtered
 
 
+def _lowpass_stateful(signal: np.ndarray, cutoff: float, sr: int,
+                      zi: np.ndarray | None = None,
+                      order: int = 2) -> tuple[np.ndarray, np.ndarray]:
+    """Stateful Butterworth low-pass filter. Returns (filtered, final_zi).
+
+    Pass *zi* from the previous block to maintain continuity across blocks.
+    """
+    nyquist = sr / 2
+    freq = min(cutoff / nyquist, 0.99)
+    freq = max(freq, 0.001)
+
+    sos = scipy_signal.butter(order, freq, btype="low", output="sos")
+    if zi is None:
+        zi = scipy_signal.sosfilt_zi(sos) * signal[0] if len(signal) > 0 else scipy_signal.sosfilt_zi(sos) * 0.0
+    filtered, zo = scipy_signal.sosfilt(sos, signal, zi=zi)
+    return filtered, zo
+
+
 # ---------------------------------------------------------------------------
 # ADSR Envelope
 # ---------------------------------------------------------------------------
@@ -147,13 +165,13 @@ def _adsr(n_samples: int, sr: int, attack: float = 0.01, decay: float = 0.05,
         env[pos:pos + a] = np.linspace(0, 1, a)
         pos += a
     if d > 0:
-        env[pos:pos + d] = np.linspace(1, sustain, d)
+        env[pos:pos + d] = sustain + (1.0 - sustain) * np.exp(-5.0 * np.linspace(0, 1, d))
         pos += d
     if s > 0:
         env[pos:pos + s] = sustain
         pos += s
     if r > 0:
-        env[pos:pos + r] = np.linspace(sustain, 0, r)
+        env[pos:pos + r] = sustain * np.exp(-5.0 * np.linspace(0, 1, r))
     return env
 
 
@@ -225,19 +243,19 @@ def _synth_brass(freq: float, duration: float, sr: int,
 
     # Filter envelope: opens on attack, then settles
     filter_env = _adsr(n, sr, attack=0.05, decay=0.2, sustain=0.4, release=0.1)
-    # Sweep cutoff from low to high
+    # Sweep cutoff from low to high (stateful filtering for continuity)
     base_cutoff = freq * 2
     max_cutoff = min(freq * 10 * cutoff_scale, sr / 2 - 100)
     if max_cutoff > 100:
-        # Apply filter per-block for envelope following
         block_size = sr // 20  # 50ms blocks
         filtered = np.zeros(n)
+        zi = None
         for start in range(0, n, block_size):
             end = min(start + block_size, n)
             env_val = np.mean(filter_env[start:end])
             cutoff = base_cutoff + (max_cutoff - base_cutoff) * env_val
             cutoff = max(100, min(cutoff, sr / 2 - 100))
-            filtered[start:end] = _lowpass(sig[start:end], cutoff, sr, resonance=0.3)
+            filtered[start:end], zi = _lowpass_stateful(sig[start:end], cutoff, sr, zi=zi)
         sig = filtered
 
     env = _adsr(n, sr, attack=0.03, decay=0.1, sustain=0.5, release=0.08)
@@ -246,31 +264,40 @@ def _synth_brass(freq: float, duration: float, sr: int,
 
 def _synth_bass(freq: float, duration: float, sr: int,
                 cutoff_scale: float = 1.0) -> np.ndarray:
-    """Bass: filtered saw + sub sine with resonant LP sweep on attack."""
+    """Bass: filtered saw + sub sine + 2nd harmonic, with warm saturation."""
     n = int(sr * duration)
     t = np.arange(n) / sr
 
     # Band-limited sawtooth
-    saw = _sawtooth(freq, duration, sr) * 0.35
-    # Sub-octave sine
-    sub = _sine(freq / 2, duration, sr) * 0.45
+    saw = _sawtooth(freq, duration, sr) * 0.30
+    # Sub-oscillator at root frequency (not freq/2 which is often sub-audible)
+    sub = _sine(freq, duration, sr) * 0.40
+    # 2nd harmonic sine for body
+    harm2 = _sine(freq * 2, duration, sr) * 0.15
 
-    # Resonant LP sweep: fast attack envelope
-    filter_env = np.exp(-8.0 * t)  # Fast exponential decay
+    sig = saw + sub + harm2
+
+    # Soft saturation for analog warmth
+    _sat_drive = 1.5
+    sig = np.tanh(sig * _sat_drive) / np.tanh(_sat_drive)
+
+    # LP sweep: fast attack envelope (stateful filtering for continuity)
+    filter_env = np.exp(-8.0 * t)
     base_cutoff = freq * 1.5
-    max_cutoff = min(freq * 8 * cutoff_scale, sr / 2 - 100)
+    max_cutoff = min(freq * 6 * cutoff_scale, sr / 2 - 100)
     if max_cutoff > 100:
         block_size = sr // 40  # 25ms blocks
-        filtered_saw = np.zeros(n)
+        filtered = np.zeros(n)
+        zi = None
         for start in range(0, n, block_size):
             end = min(start + block_size, n)
             env_val = np.mean(filter_env[start:end])
             cutoff = base_cutoff + (max_cutoff - base_cutoff) * env_val
             cutoff = max(100, min(cutoff, sr / 2 - 100))
-            filtered_saw[start:end] = _lowpass(saw[start:end], cutoff, sr, resonance=0.4)
-        saw = filtered_saw
+            filtered[start:end], zi = _lowpass_stateful(
+                sig[start:end], cutoff, sr, zi=zi, order=3)
+        sig = filtered
 
-    sig = saw + sub
     env = _adsr(n, sr, attack=0.005, decay=0.06, sustain=0.55, release=0.05)
     out = sig * env
     return out[:n]
@@ -309,19 +336,20 @@ def _synth_pad(freq: float, duration: float, sr: int,
         f = freq * (2.0 ** (dc / 1200.0))
         sig += _sawtooth(f, duration, sr) * (0.2 / len(detune_cents) * 2)
 
-    # Slow LFO filter sweep
+    # Slow LFO filter sweep (stateful filtering for continuity)
     lfo = 0.5 + 0.5 * np.sin(2 * np.pi * 0.2 * t)  # 0.2 Hz LFO
     base_cutoff = freq * 2
     max_cutoff = min(freq * 6 * cutoff_scale, sr / 2 - 100)
     if max_cutoff > 100:
         block_size = sr // 10  # 100ms blocks
         filtered = np.zeros(n)
+        zi = None
         for start in range(0, n, block_size):
             end = min(start + block_size, n)
             lfo_val = np.mean(lfo[start:end])
             cutoff = base_cutoff + (max_cutoff - base_cutoff) * lfo_val
             cutoff = max(100, min(cutoff, sr / 2 - 100))
-            filtered[start:end] = _lowpass(sig[start:end], cutoff, sr)
+            filtered[start:end], zi = _lowpass_stateful(sig[start:end], cutoff, sr, zi=zi)
         sig = filtered
 
     env = _adsr(n, sr, attack=0.3, decay=0.15, sustain=0.75, release=0.4)
@@ -501,8 +529,16 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
             bend_amount = 1.02  # 2% up
             n_bent = int(len(sig) / bend_amount)
             if n_bent > 0:
-                indices = np.linspace(0, len(sig) - 1, n_bent).astype(int)
-                sig = sig[indices]
+                fractional_indices = np.linspace(0, len(sig) - 1, n_bent)
+                sig = np.interp(fractional_indices, np.arange(len(sig)), sig)
+
+        # Micro-fades (2ms cosine) to prevent clicks at note boundaries
+        fade_samples = min(int(0.002 * sr), len(sig) // 2)
+        if fade_samples > 0:
+            fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, fade_samples)))
+            fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_samples)))
+            sig[:fade_samples] *= fade_in
+            sig[-fade_samples:] *= fade_out
 
         # Scale by velocity
         sig = sig * (velocity / 127.0)
@@ -547,6 +583,23 @@ def synthesize_audio(
         "motifs": mix_cfg.get("motifs", 0.65),
     }
 
+    # Molecular-adaptive emphasis factors (0.7x–1.0x)
+    # Emphasize layers that correspond to the molecule's dominant features
+    chain_emphasis = min(1.0, 0.7 + 0.3 * (feat.longest_chain / max(feat.heavy_atom_count, 1)))
+    ring_emphasis = min(1.0, 0.7 + 0.3 * (feat.ring_count / max(feat.heavy_atom_count / 3, 1)))
+    aromatic_emphasis = min(1.0, 0.7 + 0.3 * feat.aromatic_fraction)
+    branch_emphasis = min(1.0, 0.7 + 0.3 * (feat.branch_count / max(feat.heavy_atom_count / 3, 1)))
+    fg_emphasis = min(1.0, 0.7 + 0.3 * (len(feat.functional_groups) / 5.0))
+
+    emphasis_map = {
+        "lead_melody": chain_emphasis,
+        "bass_loop": ring_emphasis,
+        "counter_melody": branch_emphasis,
+        "drone_pad": aromatic_emphasis,
+        "percussion": 1.0,  # Percussion always at full
+        "motifs": fg_emphasis,
+    }
+
     for layer in layers.all_layers():
         if not layer.notes:
             continue
@@ -554,13 +607,15 @@ def synthesize_audio(
 
         # Determine mix volume from layer name
         vol = 0.5
+        emphasis = 1.0
         for prefix, v in volume_map.items():
             if layer.name.startswith(prefix):
                 vol = v
+                emphasis = emphasis_map.get(prefix, 1.0)
                 break
 
-        # Scale by arrangement density
-        vol *= arrangement_density
+        # Scale by arrangement density and molecular emphasis
+        vol *= arrangement_density * emphasis
 
         result.append((layer.name, audio, vol))
 

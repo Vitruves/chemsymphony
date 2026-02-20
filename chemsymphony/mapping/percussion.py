@@ -107,4 +107,61 @@ def generate_percussion(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
             program=0,
         ))
 
+    # Universal heartbeat rhythm: all molecules with >5 heavy atoms get a
+    # rhythmic foundation based on atomic properties.
+    if feat.heavy_atom_count > 5:
+        heartbeat_notes: list[NoteEvent] = []
+
+        # Ring count determines time feel
+        if feat.ring_count == 0:
+            beats_per_measure = 4  # 4/4
+        elif feat.ring_count <= 2:
+            beats_per_measure = 3  # 3/4
+        else:
+            beats_per_measure = 6  # 6/8
+
+        # Double bond fraction determines subdivision density
+        subdivisions = 1
+        if feat.double_bond_fraction > 0.3:
+            subdivisions = 2
+        if feat.double_bond_fraction > 0.6:
+            subdivisions = 4
+
+        # Aromatic fraction modulates velocity
+        base_velocity = int(60 + feat.aromatic_fraction * 40)
+        base_velocity = min(100, base_velocity)
+
+        beat = 0.0
+        step_size = 1.0 / subdivisions
+        measure_beat = 0
+        while beat < beats_total:
+            # Downbeat accent
+            is_downbeat = measure_beat == 0
+            vel = min(120, base_velocity + 20) if is_downbeat else base_velocity
+
+            # Apply swing to off-beat subdivisions
+            hit_beat = beat
+            if swing > 0 and measure_beat % 2 == 1:
+                hit_beat += swing * step_size * 0.5
+
+            heartbeat_notes.append(NoteEvent(
+                pitch=36,  # Bass Drum 1
+                start=hit_beat,
+                duration=0.25,
+                velocity=vel,
+                channel=9,
+            ))
+
+            beat += step_size
+            measure_beat = (measure_beat + 1) % (beats_per_measure * subdivisions)
+
+        if heartbeat_notes:
+            layers.append(Layer(
+                name="percussion_heartbeat",
+                instrument="percussion_heartbeat",
+                channel=9,
+                notes=heartbeat_notes,
+                program=0,
+            ))
+
     return layers

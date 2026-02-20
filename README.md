@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="chemsymphony.png" alt="ChemSymphony Logo" width="300">
+</p>
+
 # 🎵 ChemSymphony
 
 **Generate unique audio from molecular SMILES strings.**

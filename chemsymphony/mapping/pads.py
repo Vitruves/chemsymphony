@@ -39,6 +39,8 @@ def generate_pads(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
     # But we pass filter info through effects
     pad_program = 89  # Pad 2 (warm)
 
+    scale_intervals = ap.get("scale_intervals", [0, 2, 4, 5, 7, 9, 11])
+
     layers: list[Layer] = []
     aromatic_idx = 0
 
@@ -62,25 +64,57 @@ def generate_pads(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
             **detune_effect,
         }
 
-        # Single sustained note spanning the composition
-        notes = [NoteEvent(
-            pitch=max(36, min(84, ring_root)),
-            start=0.0,
-            duration=beats_total * sustain_factor,
-            velocity=pad_velocity,
-            channel=4,
-            effects=filter_effects,
-        )]
+        # Scale-aware voicings based on ring heteroatom count
+        # 0 heteroatoms → power chord (root + 5th)
+        # 1 → triad (root + 3rd + 5th)
+        # 2 → seventh chord (root + 3rd + 5th + 7th)
+        # 3+ → cluster chord (root + 2nd + 3rd + 5th)
+        voicing_intervals = [0]  # Always include root
+        if hetero_count == 0:
+            # Power chord: root + fifth
+            voicing_intervals.append(7)
+        elif hetero_count == 1:
+            # Triad from scale
+            if len(scale_intervals) >= 5:
+                voicing_intervals.append(scale_intervals[2])  # 3rd
+                voicing_intervals.append(scale_intervals[4])  # 5th
+            else:
+                voicing_intervals.extend([4, 7])
+        elif hetero_count == 2:
+            # Seventh chord from scale
+            if len(scale_intervals) >= 7:
+                voicing_intervals.append(scale_intervals[2])  # 3rd
+                voicing_intervals.append(scale_intervals[4])  # 5th
+                voicing_intervals.append(scale_intervals[6])  # 7th
+            else:
+                voicing_intervals.extend([4, 7, 10])
+        else:
+            # Cluster chord
+            if len(scale_intervals) >= 5:
+                voicing_intervals.append(scale_intervals[1])  # 2nd
+                voicing_intervals.append(scale_intervals[2])  # 3rd
+                voicing_intervals.append(scale_intervals[4])  # 5th
+            else:
+                voicing_intervals.extend([2, 4, 7])
 
-        # Add a fifth above for richer texture
-        notes.append(NoteEvent(
-            pitch=max(36, min(84, ring_root + 7)),
-            start=0.0,
-            duration=beats_total * sustain_factor,
-            velocity=pad_velocity - 10,
-            channel=4,
-            effects={"pad": True, "timbre_organic": timbre_organic, **detune_effect},
-        ))
+        # Stagger entry time for multiple aromatic rings
+        entry_beat = aromatic_idx * (beats_total * 0.1)
+        entry_beat = min(entry_beat, beats_total * 0.3)  # Don't start too late
+
+        notes: list[NoteEvent] = []
+        for vi, interval in enumerate(voicing_intervals):
+            pitch = max(36, min(84, ring_root + interval))
+            vel = max(40, pad_velocity - vi * 5)
+            notes.append(NoteEvent(
+                pitch=pitch,
+                start=entry_beat,
+                duration=beats_total * sustain_factor,
+                velocity=vel,
+                channel=4,
+                effects=filter_effects if vi == 0 else {
+                    "pad": True, "timbre_organic": timbre_organic, **detune_effect,
+                },
+            ))
 
         layers.append(Layer(
             name=f"drone_pad_{aromatic_idx + 1}",

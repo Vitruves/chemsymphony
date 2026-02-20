@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from chemsymphony.config import Config
 from chemsymphony.features import MolecularFeatures
+
+if TYPE_CHECKING:
+    from chemsymphony.mapping.form import FormParams
 
 
 @dataclass
@@ -32,11 +36,13 @@ class Layer:
     program: int = 0  # GM MIDI program number
 
 
-def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
+def generate_melody(feat: MolecularFeatures, cfg: Config,
+                    form: FormParams | None = None) -> Layer:
     """Generate the lead melody layer from the longest chain.
 
     Uses harmonic_tension for chromatic passing tones, swing for rhythmic
     displacement, and a velocity contour (crescendo → diminuendo).
+    Optionally uses FormParams for climax position and octave range.
     """
     ap = feat.audio_parameters
     root = ap["root_note_midi"]
@@ -64,7 +70,12 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
     bond_orders = feat.chain_bond_orders
 
     # Climax position for velocity contour (from form params or default 0.6)
-    climax_pos = 0.6
+    climax_pos = form.climax_position if form is not None else 0.6
+
+    # Octave range from form params — clamp pitch range accordingly
+    octave_range = form.octave_range if form is not None else 2
+    pitch_lo = max(36, root - 12)
+    pitch_hi = min(96, root + 12 * octave_range)
 
     for i in range(chain_len):
         # At branch points, reverse direction
@@ -91,7 +102,7 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
             degree_in_scale = scale_degree % len(scale)
             pitch = root + scale[degree_in_scale] + 12 * octave
 
-        pitch = max(36, min(96, pitch))
+        pitch = max(pitch_lo, min(pitch_hi, pitch))
 
         # Determine note duration and effects based on bond orders
         dur = note_dur

@@ -54,19 +54,33 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
         size = min(ring["size"], 7)
         heteroatoms = ring["heteroatoms"]
         is_aromatic = ring["is_aromatic"]
+        is_fused = idx in fused_set
 
         # Base pitch with octave offset for ring system
         octave_offset = ring_system_octave.get(idx, 0) * 12
         base_pitch = max(24, min(60, root + octave_offset))
 
-        # Build loop pitches: root + fifth, plus chromatic from heteroatoms
-        pitches = [base_pitch, base_pitch + 7]
+        # Ring-size-based pitch patterns
+        # 5-ring → minor 3rd intervals, 6-ring → perfect 5th, 7-ring → quartal
+        if size == 5:
+            pitches = [base_pitch, base_pitch + 3]  # Minor 3rd
+        elif size == 7:
+            pitches = [base_pitch, base_pitch + 5]  # Quartal (perfect 4th)
+        else:
+            pitches = [base_pitch, base_pitch + 7]  # Perfect 5th (default, incl 6-ring)
+
+        # Add chromatic color from heteroatoms
         for ha in heteroatoms:
             offset = _HETEROATOM_OFFSETS.get(ha, 2)
             pitches.append(base_pitch + offset)
 
-        # Note duration and velocity based on ring character
-        note_dur = 1.0 if is_aromatic else 0.5
+        # Note duration and velocity based on ring character and topology
+        # Fused rings get longer legato notes, isolated get staccato
+        if is_fused:
+            note_dur = 1.5 if is_aromatic else 1.0
+        else:
+            note_dur = 0.75 if is_aromatic else 0.35
+
         # Warmer filter = louder bass
         velocity_base = int(75 + filter_warmth * 30) if is_aromatic else int(90 + filter_warmth * 20)
         velocity_base = min(120, velocity_base)

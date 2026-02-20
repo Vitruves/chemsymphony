@@ -51,14 +51,15 @@ def generate_all_layers(feat: MolecularFeatures, cfg: Config) -> CompositionLaye
     from chemsymphony.mapping.form import generate_form
 
     layers = CompositionLayers()
-    layers.melody = generate_melody(feat, cfg)
+    # Compute form first so melody can use climax_position and octave_range
+    layers.form = generate_form(feat, cfg)
+    layers.melody = generate_melody(feat, cfg, form=layers.form)
     layers.bass = generate_bass(feat, cfg)
     layers.harmony = generate_harmony(feat, cfg)
     layers.pads = generate_pads(feat, cfg)
     layers.percussion = generate_percussion(feat, cfg)
     layers.motifs = generate_motifs(feat, cfg)
     layers.expression = generate_expression(feat, cfg)
-    layers.form = generate_form(feat, cfg)
 
     # Apply form-level adjustments
     _apply_form(layers, feat, cfg)

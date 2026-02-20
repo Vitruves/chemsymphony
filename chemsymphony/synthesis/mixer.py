@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import signal as scipy_signal
 
 from chemsymphony.config import Config
 from chemsymphony.features import MolecularFeatures
@@ -18,7 +19,7 @@ from chemsymphony.synthesis.effects import (
 def _compress(audio: np.ndarray, sr: int, threshold_db: float = -12.0,
               ratio: float = 4.0, attack_ms: float = 5.0,
               release_ms: float = 50.0) -> np.ndarray:
-    """RMS-based compressor on a mono signal."""
+    """RMS-based compressor on a mono signal (vectorized envelope)."""
     if len(audio) == 0:
         return audio
 
@@ -33,30 +34,28 @@ def _compress(audio: np.ndarray, sr: int, threshold_db: float = -12.0,
 
     # Compute RMS envelope
     squared = audio ** 2
-    # Use cumsum for efficient windowed RMS
     pad = np.zeros(rms_window)
     padded = np.concatenate([pad, squared])
     cumsum = np.cumsum(padded)
     rms = np.sqrt((cumsum[rms_window:] - cumsum[:-rms_window]) / rms_window)
     rms = rms[:len(audio)]
 
-    # Compute gain reduction
-    gain = np.ones_like(audio)
-    envelope = 0.0
+    # Compute target gain for all samples at once
+    target_gain = np.ones_like(audio)
+    above = rms > threshold
+    if np.any(above):
+        compressed_level = threshold + (rms[above] - threshold) / ratio
+        target_gain[above] = compressed_level / np.maximum(rms[above], 1e-10)
 
+    # Smooth with asymmetric attack/release envelope follower
+    gain = np.empty_like(audio)
+    envelope = 1.0
     for i in range(len(audio)):
-        level = rms[i]
-        if level > threshold:
-            target_gain = threshold + (level - threshold) / ratio
-            target_gain /= max(level, 1e-10)
+        tg = target_gain[i]
+        if tg < envelope:
+            envelope = attack_coeff * envelope + (1.0 - attack_coeff) * tg
         else:
-            target_gain = 1.0
-
-        # Smooth the envelope
-        if target_gain < envelope:
-            envelope = attack_coeff * envelope + (1 - attack_coeff) * target_gain
-        else:
-            envelope = release_coeff * envelope + (1 - release_coeff) * target_gain
+            envelope = release_coeff * envelope + (1.0 - release_coeff) * tg
         gain[i] = envelope
 
     return audio * gain
@@ -82,9 +81,26 @@ def _compress_stereo(left: np.ndarray, right: np.ndarray, sr: int,
 # ---------------------------------------------------------------------------
 
 def _soft_limit(audio: np.ndarray, headroom_db: float = -1.0) -> np.ndarray:
-    """Soft limiter using tanh with headroom."""
+    """Soft limiter using tanh with headroom and 2x oversampling."""
     ceiling = 10.0 ** (headroom_db / 20.0)  # ~0.89 for -1dB
-    return np.tanh(audio / ceiling) * ceiling
+
+    # 2x upsample
+    n = len(audio)
+    upsampled = np.zeros(n * 2, dtype=audio.dtype)
+    upsampled[::2] = audio
+    upsampled[1::2] = audio
+    # Smooth interpolation via simple averaging
+    upsampled[1:-1:2] = (audio[:-1] + audio[1:]) * 0.5
+
+    # Apply nonlinearity at higher sample rate
+    limited = np.tanh(upsampled / ceiling) * ceiling
+
+    # Anti-alias lowpass before downsampling
+    sos = scipy_signal.butter(4, 0.5, btype="low", output="sos")
+    limited = scipy_signal.sosfilt(sos, limited)
+
+    # 2x downsample
+    return limited[::2]
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +160,23 @@ def mix_layers(
         left += l_ch * volume
         right += r_ch * volume
 
-    # Step 2: Bus compression
-    left, right = _compress_stereo(left, right, sr, threshold_db=-12.0, ratio=4.0)
+    # Step 1.5: DC offset removal (5Hz highpass, Butterworth order 1)
+    dc_cutoff = 5.0 / (sr / 2)
+    if 0 < dc_cutoff < 1:
+        dc_sos = scipy_signal.butter(1, dc_cutoff, btype="high", output="sos")
+        left = scipy_signal.sosfilt(dc_sos, left)
+        right = scipy_signal.sosfilt(dc_sos, right)
+
+    # Step 2: Bus compression — adaptive threshold and ratio from molecular complexity
+    # Higher bertz_ct (more complex) → more aggressive compression (lower threshold)
+    # Higher aromatic_fraction → tighter ratio (more controlled dynamics)
+    bertz_ct = feat.bertz_ct
+    aromatic_frac = feat.aromatic_fraction
+    comp_threshold = -9.0 - 6.0 * min(bertz_ct / 1500.0, 1.0)   # -9 to -15 dB
+    comp_ratio = 2.0 + 3.0 * aromatic_frac                        # 2:1 to 5:1
+    left, right = _compress_stereo(left, right, sr,
+                                   threshold_db=comp_threshold,
+                                   ratio=comp_ratio)
 
     # Step 3: Global effects
     # Reverb — use reverb_wetness from audio params (falls back to aromatic count)

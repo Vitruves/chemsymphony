@@ -8,25 +8,47 @@ from chemsymphony.features import MolecularFeatures
 # Scale definitions as semitone intervals from root
 SCALES: dict[str, list[int]] = {
     "pentatonic_major": [0, 2, 4, 7, 9],
+    "pentatonic_minor": [0, 3, 5, 7, 10],
     "major": [0, 2, 4, 5, 7, 9, 11],
+    "lydian": [0, 2, 4, 6, 7, 9, 11],
     "mixolydian": [0, 2, 4, 5, 7, 9, 10],
     "dorian": [0, 2, 3, 5, 7, 9, 10],
+    "melodic_minor": [0, 2, 3, 5, 7, 9, 11],
     "minor": [0, 2, 3, 5, 7, 8, 10],
+    "harmonic_minor": [0, 2, 3, 5, 7, 8, 11],
+    "blues": [0, 3, 5, 6, 7, 10],
     "phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "whole_tone": [0, 2, 4, 6, 8, 10],
+    "hungarian_minor": [0, 2, 3, 6, 7, 8, 11],
     "chromatic": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
 }
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def _compute_bpm(mw: float, cfg: Config) -> int:
-    """Map molecular weight to BPM."""
+def _compute_bpm(feat: MolecularFeatures, cfg: Config) -> int:
+    """Map molecular weight + structural features to BPM.
+
+    Base BPM from MW, then modulated by rotatable bonds (+flexibility),
+    fsp3 (-saturation slows tempo), and ring density (+compactness).
+    """
+    mw = feat.molecular_weight
     if mw < 100:
         bpm = 70 + (mw / 100) * 20  # 70–90
     elif mw < 500:
         bpm = 90 + ((mw - 100) / 400) * 40  # 90–130
     else:
         bpm = 130 + min((mw - 500) / 500, 1.0) * 50  # 130–180
+
+    # Rotatable bonds add rhythmic motion
+    bpm += feat.rotatable_bond_count * 1.5
+    # High sp3 fraction → more saturated/organic → slower feel
+    bpm -= 12 * feat.fsp3
+    # Ring density → compact molecules feel faster
+    if feat.heavy_atom_count > 0:
+        ring_density = feat.ring_count / feat.heavy_atom_count
+        bpm += 20 * ring_density
+
     return int(max(cfg.min_bpm, min(cfg.max_bpm, bpm)))
 
 
@@ -36,32 +58,72 @@ def _compute_duration(heavy_atom_count: int, cfg: Config) -> float:
     return max(cfg.min_duration, min(cfg.max_duration, dur))
 
 
-def _choose_scale(heteroatom_ratio: float) -> str:
-    """Map heteroatom-to-carbon ratio to a musical scale."""
+def _choose_scale(heteroatom_ratio: float,
+                   aromatic_fraction: float = 0.0,
+                   fsp3: float = 0.0) -> str:
+    """Map heteroatom ratio + aromatic fraction + fsp3 to a musical scale.
+
+    Uses a 2D decision space: heteroatom_ratio controls darkness/tension,
+    aromatic_fraction and fsp3 select between related scales.
+    """
     if heteroatom_ratio <= 0.05:
         return "pentatonic_major"
-    elif heteroatom_ratio <= 0.3:
+    elif heteroatom_ratio <= 0.15:
+        # Low heteroatom: bright scales
+        if fsp3 > 0.5:
+            return "pentatonic_minor"  # Saturated + few heteroatoms
         return "major"
-    elif heteroatom_ratio <= 0.45:
+    elif heteroatom_ratio <= 0.25:
+        # Moderate-low heteroatom
+        if aromatic_fraction > 0.4:
+            return "mixolydian"  # Aromatic dominant
+        elif fsp3 > 0.3:
+            return "melodic_minor"  # Mixed sp3 + heteroatoms
+        return "lydian"
+    elif heteroatom_ratio <= 0.4:
+        if aromatic_fraction > 0.5:
+            return "dorian"
+        elif fsp3 > 0.4:
+            return "blues"
         return "mixolydian"
     elif heteroatom_ratio <= 0.6:
+        if aromatic_fraction > 0.3:
+            return "harmonic_minor"
         return "dorian"
     elif heteroatom_ratio <= 0.8:
+        if fsp3 > 0.5:
+            return "whole_tone"
         return "minor"
     elif heteroatom_ratio <= 1.0:
+        if aromatic_fraction > 0.3:
+            return "hungarian_minor"
         return "phrygian"
     else:
         return "chromatic"
 
 
-def _harmonic_density(unique_element_count: int) -> int:
-    """Map unique element count to harmonic density (max simultaneous notes)."""
-    if unique_element_count <= 2:
+def _harmonic_density(unique_element_count: int,
+                      fused_ring_pair_count: int = 0,
+                      branch_count: int = 0) -> int:
+    """Map unique elements + fused rings + branches to harmonic density."""
+    base = unique_element_count
+    # Fused rings add harmonic complexity
+    base += fused_ring_pair_count
+    # Branches add polyphonic texture
+    base += branch_count // 2
+
+    if base <= 2:
         return 1
-    elif unique_element_count <= 4:
+    elif base <= 3:
+        return 2
+    elif base <= 5:
         return 3
+    elif base <= 7:
+        return 4
+    elif base <= 9:
+        return 5
     else:
-        return min(unique_element_count, 6)
+        return 6
 
 
 def _note_density(total_bonds: int, duration: float) -> float:
@@ -97,7 +159,7 @@ def _clamp(val: float, lo: float, hi: float) -> float:
 def apply_master_mapping(feat: MolecularFeatures, cfg: Config) -> None:
     """Set audio_parameters on *feat* based on global molecular properties."""
     # BPM
-    bpm = cfg.bpm if cfg.bpm is not None else _compute_bpm(feat.molecular_weight, cfg)
+    bpm = cfg.bpm if cfg.bpm is not None else _compute_bpm(feat, cfg)
 
     # Duration
     duration = cfg.duration if cfg.duration is not None else _compute_duration(
@@ -107,15 +169,23 @@ def apply_master_mapping(feat: MolecularFeatures, cfg: Config) -> None:
     # Root note and scale
     if cfg.key is not None:
         root_idx, forced_mode = _parse_key(cfg.key)
-        scale_name = forced_mode or _choose_scale(feat.heteroatom_ratio)
+        scale_name = forced_mode or _choose_scale(
+            feat.heteroatom_ratio, feat.aromatic_fraction, feat.fsp3
+        )
     else:
         root_idx = feat.formula_hash  # 0–11
-        scale_name = _choose_scale(feat.heteroatom_ratio)
+        scale_name = _choose_scale(
+            feat.heteroatom_ratio, feat.aromatic_fraction, feat.fsp3
+        )
 
     root_note_midi = 60 + root_idx  # Middle C octave
     scale_intervals = SCALES[scale_name]
 
-    harmonic_dens = _harmonic_density(feat.unique_element_count)
+    harmonic_dens = _harmonic_density(
+        feat.unique_element_count,
+        len(feat.fused_ring_pairs),
+        feat.branch_count,
+    )
     note_dens = _note_density(feat.total_bond_count, duration)
 
     # §13 physicochemical → audio parameter derivations

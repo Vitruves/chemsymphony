@@ -21,6 +21,20 @@ _DEPTH_INTERVALS = {
     1: [4, 7],      # Third and fifth
     2: [10, 14],    # Seventh and ninth
     3: [6, 11],     # Tritone and major seventh
+    4: [3, 8],      # Minor third and minor sixth
+    5: [5, 9],      # Perfect fourth and major sixth
+    6: [1, 6],      # Minor second and tritone
+}
+
+# Element-family interval offsets for harmonic color differentiation
+_ELEMENT_INTERVAL_OFFSETS: dict[str, int] = {
+    "N": 1,    # Nitrogen shifts up (brighter)
+    "O": 0,    # Oxygen neutral
+    "S": -1,   # Sulfur shifts down (darker)
+    "P": -2,   # Phosphorus shifts further down
+    "F": 2,    # Fluorine bright
+    "Cl": -1,  # Chlorine dark
+    "Br": -2,  # Bromine darker
 }
 
 
@@ -49,8 +63,17 @@ def generate_harmony(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
         # Entry time based on chain position
         entry_beat = (chain_pos / chain_len) * beats_total
 
-        # Intervals based on depth
-        intervals = _DEPTH_INTERVALS.get(min(depth, 3), [4, 7])
+        # Intervals based on depth (now up to 6 levels)
+        intervals = _DEPTH_INTERVALS.get(min(depth, 6), [4, 7])
+
+        # Apply element-family interval offset for harmonic color
+        if symbols:
+            from collections import Counter
+            element_counts = Counter(symbols)
+            most_common_el = element_counts.most_common(1)[0][0]
+            el_offset = _ELEMENT_INTERVAL_OFFSETS.get(most_common_el, 0)
+            if el_offset != 0:
+                intervals = [iv + el_offset for iv in intervals]
 
         # Determine instrument from most common element in branch
         if symbols:
