@@ -33,6 +33,7 @@ ChemSymphony transforms the structural information encoded in SMILES (Simplified
   - [13. Physicochemical Properties → Mix Character](#13-physicochemical-properties--mix-character)
   - [14. SMILES String Character → Timbral Texture & Ornamentation](#14-smiles-string-character--timbral-texture--ornamentation)
   - [15. Graph Counting Features → Spectral Dynamics & Spatial Effects](#15-graph-counting-features--spectral-dynamics--spatial-effects)
+- [Genre Post-Processing](#genre-post-processing)
 - [Output Formats](#output-formats)
 - [Examples](#examples)
 - [Python API](#python-api)
@@ -81,6 +82,13 @@ chemsymphony -s "c1ccccc1" -f midi -o benzene_tracks/
 
 # Verbose mode — show all extracted features
 chemsymphony -s "CC(=O)OC1=CC=CC=C1C(=O)O" -v
+
+# Apply genre styling
+chemsymphony -s "c1ccccc1" --post-processing techno -o benzene_techno.mp3
+chemsymphony -s "c1ccccc1" --post-processing ambient -o benzene_ambient.mp3
+
+# List available genres
+chemsymphony --list-genres
 ```
 
 ---
@@ -102,6 +110,10 @@ Audio tuning:
   --duration FLOAT           Override duration in seconds (default: auto-derived)
   --key TEXT                 Force musical key, e.g. "Cm", "G" (default: auto-derived)
   --seed INT                 Random seed for reproducible stochastic elements
+  --post-processing GENRE    Apply genre-specific audio styling (see --list-genres)
+
+Genre discovery:
+  --list-genres              List all available genre profiles and exit
 
 Verbosity:
   -v, --verbose              Print extracted molecular features and mapping details
@@ -497,6 +509,71 @@ Simple counting operations on the molecular graph (hybridization states, neighbo
 
 ---
 
+## Genre Post-Processing
+
+The `--post-processing` flag applies genre-specific styling to the generated audio. It uses a hybrid approach: BPM is clamped to the genre's range **before** generation (for better rhythmic quality), while audio effects (EQ, compression, saturation, reverb, filtering) are applied **after** mixing.
+
+### Available Genres
+
+| Genre | Flag | BPM Range | Character |
+|---|---|---|---|
+| **Acid Techno** | `acid_techno` | 130–150 | Aggressive, squelchy, heavy saturation, boosted highs |
+| **Ambient** | `ambient` | 60–90 | Spacious, heavy reverb, pad-forward, soft dynamics |
+| **Drum & Bass** | `drum_and_bass` | 170–180 | Fast breakbeats, deep sub-bass, high energy |
+| **Dub** | `dub` | 60–90 | Deep bass, spacious delay/reverb, warm |
+| **Gabber** | `gabber` | 160–200 | Extreme tempo, heavy distortion, max percussion |
+| **Hip Hop** | `hip_hop` | 80–100 | Boom-bap, heavy bass, swung grooves |
+| **House** | `house` | 118–130 | Warm low-end, groovy, moderate reverb |
+| **Industrial** | `industrial` | 120–140 | Harsh, metallic, aggressive compression + saturation |
+| **Jazz** | `jazz` | 80–140 | Warm, light compression, high swing, moderate reverb |
+| **Lo-Fi** | `lo_fi` | 70–90 | Warm, filtered, vinyl aesthetic, rolled-off highs |
+| **Minimal** | `minimal` | 120–135 | Sparse, clean, stripped-back layers |
+| **Synthwave** | `synthwave` | 80–118 | Retro 80s, warm pads, moderate delay |
+| **Techno** | `techno` | 125–145 | Driving, bass/percussion boost, mid-cut, punchy |
+| **Trance** | `trance` | 138–150 | Euphoric, layered pads, reverb + delay |
+
+### How It Works
+
+Genre post-processing is applied in two phases:
+
+**Pre-generation** (before audio synthesis):
+1. Clamp BPM to the genre's range (e.g., ambient forces 60–90 BPM regardless of molecular properties)
+2. Adjust layer mix levels (e.g., techno boosts percussion 1.4x, cuts pads 0.5x)
+3. Override swing amount if the genre specifies it (e.g., jazz forces high swing)
+
+**Post-generation** (after `mix_layers` produces the stereo array):
+1. High-pass filter — remove sub-bass rumble for dance genres
+2. Low-pass filter — tame highs for warm genres
+3. EQ — genre-specific frequency shaping
+4. Compression — genre-specific dynamics control
+5. Saturation — soft distortion (none for ambient, heavy for gabber)
+6. Reverb — genre-specific depth override
+7. Delay — tempo-synced echo
+8. Re-normalize to -1 dBFS + soft-limit + fade
+
+### Adding Custom Genres
+
+New genres are added by creating a Python file in the `chemsymphony/genres/` directory. The file must export a `GENRE` object:
+
+```python
+# chemsymphony/genres/my_genre.py
+from chemsymphony.genres import GenreProfile
+
+GENRE = GenreProfile(
+    name="My Genre",
+    bpm_range=(100, 120),
+    mix_adjustments={"percussion": 1.3, "drone_pads": 0.5},
+    eq={"low_boost": 0.4, "mid_boost": 0.0, "brightness": 0.2},
+    compression={"threshold_db": -14.0, "ratio": 5.0},
+    reverb_depth=0.3,
+    saturation=0.2,
+)
+```
+
+The genre will be automatically discovered by `--list-genres` and available via `--post-processing my_genre`.
+
+---
+
 ## Output Formats
 
 ### MP3 / WAV (Direct Audio)
@@ -649,6 +726,17 @@ cs.generate_to_file(
     key="Am",       # Force A minor
     seed=42         # Reproducible
 )
+
+# Genre post-processing
+from chemsymphony.config import load_config
+
+cfg = load_config(post_processing="techno")
+cs = ChemSymphony(config=cfg)
+cs.generate_to_file("c1ccccc1", output="benzene_techno.mp3", fmt="mp3")
+
+# List available genres
+from chemsymphony.genres import list_genres
+print(list_genres())  # ['acid_techno', 'ambient', 'drum_and_bass', ...]
 ```
 
 ---
@@ -739,7 +827,23 @@ chemsymphony/
 │   │   ├── audio_export.py      # MP3/WAV file writing
 │   │   ├── midi_export.py       # MIDI file writing
 │   │   └── manifest.py          # JSON manifest generation
-│   └── config.py                # Configuration loading
+│   ├── config.py                # Configuration loading
+│   └── genres/
+│       ├── __init__.py            # GenreProfile, list/load/apply functions
+│       ├── acid_techno.py         # Acid techno profile
+│       ├── ambient.py             # Ambient profile
+│       ├── drum_and_bass.py       # Drum & bass profile
+│       ├── dub.py                 # Dub profile
+│       ├── gabber.py              # Gabber profile
+│       ├── hip_hop.py             # Hip hop profile
+│       ├── house.py               # House profile
+│       ├── industrial.py          # Industrial profile
+│       ├── jazz.py                # Jazz profile
+│       ├── lo_fi.py               # Lo-fi profile
+│       ├── minimal.py             # Minimal profile
+│       ├── synthwave.py           # Synthwave profile
+│       ├── techno.py              # Techno profile
+│       └── trance.py              # Trance profile
 └── tests/
     ├── test_canonicalize.py
     ├── test_features.py

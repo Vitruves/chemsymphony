@@ -19,7 +19,7 @@ from chemsymphony.synthesis.effects import (
 def _compress(audio: np.ndarray, sr: int, threshold_db: float = -12.0,
               ratio: float = 4.0, attack_ms: float = 5.0,
               release_ms: float = 50.0) -> np.ndarray:
-    """RMS-based compressor on a mono signal (vectorized envelope)."""
+    """RMS-based compressor with sidechain HPF and automatic makeup gain."""
     if len(audio) == 0:
         return audio
 
@@ -27,13 +27,20 @@ def _compress(audio: np.ndarray, sr: int, threshold_db: float = -12.0,
     attack_coeff = np.exp(-1.0 / (attack_ms * sr / 1000.0))
     release_coeff = np.exp(-1.0 / (release_ms * sr / 1000.0))
 
-    # RMS envelope detection with smoothing
+    # Sidechain HPF: prevent bass from triggering excessive compression
+    sc_cutoff = 100.0 / (sr / 2)
+    if 0 < sc_cutoff < 1:
+        sc_sos = scipy_signal.butter(2, sc_cutoff, btype="high", output="sos")
+        detection = scipy_signal.sosfilt(sc_sos, audio)
+    else:
+        detection = audio
+
+    # RMS envelope detection with smoothing (on sidechain-filtered signal)
     rms_window = int(sr * 0.01)  # 10ms window
     if rms_window < 1:
         rms_window = 1
 
-    # Compute RMS envelope
-    squared = audio ** 2
+    squared = detection ** 2
     pad = np.zeros(rms_window)
     padded = np.concatenate([pad, squared])
     cumsum = np.cumsum(padded)
@@ -58,7 +65,11 @@ def _compress(audio: np.ndarray, sr: int, threshold_db: float = -12.0,
             envelope = release_coeff * envelope + (1.0 - release_coeff) * tg
         gain[i] = envelope
 
-    return audio * gain
+    # Automatic makeup gain: compensate for average gain reduction
+    makeup_db = -threshold_db * (1.0 - 1.0 / ratio) * 0.5
+    makeup = 10.0 ** (min(makeup_db, 12.0) / 20.0)
+
+    return audio * gain * makeup
 
 
 def _compress_stereo(left: np.ndarray, right: np.ndarray, sr: int,
@@ -104,6 +115,51 @@ def _soft_limit(audio: np.ndarray, headroom_db: float = -1.0) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Tape saturation
+# ---------------------------------------------------------------------------
+
+def _tape_saturate(audio: np.ndarray, sr: int,
+                   drive: float = 0.3) -> np.ndarray:
+    """Tape-style saturation: soft-clipping + gentle HF rolloff for warmth."""
+    if drive <= 0:
+        return audio
+    gain = 1.0 + drive * 2.0
+    saturated = np.tanh(audio * gain)
+    # Gentle HF rolloff for tape warmth (~12kHz)
+    cutoff = min(12000.0 / (sr / 2), 0.99)
+    if cutoff > 0.01:
+        sos = scipy_signal.butter(1, cutoff, btype="low", output="sos")
+        saturated = scipy_signal.sosfilt(sos, saturated)
+    return saturated
+
+
+# ---------------------------------------------------------------------------
+# Stereo widening
+# ---------------------------------------------------------------------------
+
+def _stereo_widen(left: np.ndarray, right: np.ndarray,
+                  width: float = 1.3) -> tuple[np.ndarray, np.ndarray]:
+    """Mid/side stereo widening. width=1.0 unchanged, >1.0 wider."""
+    mid = (left + right) * 0.5
+    side = (left - right) * 0.5
+    side *= width
+    return mid + side, mid - side
+
+
+def _haas_widen(left: np.ndarray, right: np.ndarray,
+                sr: int, delay_ms: float = 8.0,
+                mix: float = 0.3) -> tuple[np.ndarray, np.ndarray]:
+    """Haas-effect stereo widening via short delay on one channel."""
+    delay_samples = int(delay_ms * sr / 1000)
+    if delay_samples <= 0 or delay_samples >= len(right):
+        return left, right
+    delayed = np.zeros_like(right)
+    delayed[delay_samples:] = right[:-delay_samples]
+    right_out = right * (1.0 - mix) + delayed * mix
+    return left, right_out
+
+
+# ---------------------------------------------------------------------------
 # Main mixer
 # ---------------------------------------------------------------------------
 
@@ -134,11 +190,14 @@ def mix_layers(
     left = np.zeros(total_samples, dtype=np.float64)
     right = np.zeros(total_samples, dtype=np.float64)
 
+    # Layer names that benefit from Haas stereo widening
+    _haas_layers = {"counter_melody", "motifs", "drone_pad"}
+
     for name, audio, volume in raw_layers:
         # Audio is stereo (N, 2)
         if audio.ndim == 2 and audio.shape[1] == 2:
-            l_ch = audio[:, 0]
-            r_ch = audio[:, 1]
+            l_ch = audio[:, 0].copy()
+            r_ch = audio[:, 1].copy()
         else:
             # Fallback for mono: apply center pan
             l_ch = audio * 0.707
@@ -156,6 +215,11 @@ def mix_layers(
             r_pad[:n] = r_ch
             l_ch = l_pad
             r_ch = r_pad
+
+        # Haas-effect widening on non-central layers
+        layer_prefix = name.split("_")[0] + "_" + name.split("_")[1] if "_" in name else name
+        if any(name.startswith(h) for h in _haas_layers):
+            l_ch, r_ch = _haas_widen(l_ch, r_ch, sr, delay_ms=8.0, mix=0.3)
 
         left += l_ch * volume
         right += r_ch * volume
@@ -178,15 +242,23 @@ def mix_layers(
                                    threshold_db=comp_threshold,
                                    ratio=comp_ratio)
 
+    # Step 2.5: Tape saturation for analog warmth
+    left = _tape_saturate(left, sr, drive=0.15)
+    right = _tape_saturate(right, sr, drive=0.15)
+
     # Step 3: Global effects
     # Reverb — use reverb_wetness from audio params (falls back to aromatic count)
     reverb_depth = ap.get("reverb_wetness", min(1.0, feat.aromatic_atom_count / 20.0))
     reverb_diffusion = ap.get("reverb_diffusion", 0.0)
     # Diffusion increases damping (more diffuse = smoother tail)
     reverb_damping = 0.3 + 0.4 * reverb_diffusion  # 0.3–0.7
+    # Decay time from molecular weight (heavier = longer reverb tail)
+    reverb_decay = 0.8 + 1.2 * min(feat.molecular_weight / 500.0, 1.0)
     if reverb_depth > 0.05:
-        left = apply_reverb(left, sr, depth=reverb_depth, damping=reverb_damping)
-        right = apply_reverb(right, sr, depth=reverb_depth, damping=reverb_damping)
+        left = apply_reverb(left, sr, depth=reverb_depth, damping=reverb_damping,
+                            decay_time=reverb_decay)
+        right = apply_reverb(right, sr, depth=reverb_depth, damping=reverb_damping,
+                             decay_time=reverb_decay)
 
     # EQ from net charge
     brightness = 0.0
@@ -226,6 +298,9 @@ def mix_layers(
         mid_boost = filter_sweep * 0.3  # 0–0.3 mid emphasis
         left = apply_eq(left, sr, mid_boost=mid_boost)
         right = apply_eq(right, sr, mid_boost=mid_boost)
+
+    # Step 3.5: Mid/side stereo widening
+    left, right = _stereo_widen(left, right, width=1.3)
 
     # Step 4: Normalize to -1 dBFS (0.89 peak)
     target_peak = 10.0 ** (-1.0 / 20.0)  # ~0.891

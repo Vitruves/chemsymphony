@@ -137,6 +137,16 @@ def _lowpass_stateful(signal: np.ndarray, cutoff: float, sr: int,
     return filtered, zo
 
 
+def _highpass(signal: np.ndarray, cutoff: float, sr: int,
+              order: int = 2) -> np.ndarray:
+    """Butterworth high-pass filter to remove sub-bass mud and DC."""
+    nyquist = sr / 2
+    freq = min(cutoff / nyquist, 0.99)
+    freq = max(freq, 0.001)
+    sos = scipy_signal.butter(order, freq, btype="high", output="sos")
+    return scipy_signal.sosfilt(sos, signal)
+
+
 # ---------------------------------------------------------------------------
 # ADSR Envelope
 # ---------------------------------------------------------------------------
@@ -163,7 +173,8 @@ def _adsr(n_samples: int, sr: int, attack: float = 0.01, decay: float = 0.05,
     env = np.zeros(n_samples)
     pos = 0
     if a > 0:
-        env[pos:pos + a] = np.linspace(0, 1, a)
+        # Cosine S-curve attack (zero-slope start and end — sounds natural)
+        env[pos:pos + a] = 0.5 * (1.0 - np.cos(np.pi * np.linspace(0, 1, a)))
         pos += a
     if d > 0:
         env[pos:pos + d] = sustain + (1.0 - sustain) * np.exp(-5.0 * np.linspace(0, 1, d))
@@ -186,7 +197,7 @@ def _midi_to_freq(midi_note: int) -> float:
 
 def _synth_piano(freq: float, duration: float, sr: int,
                  cutoff_scale: float = 1.0) -> np.ndarray:
-    """Piano: 8 harmonics with per-harmonic decay, slight chorus detuning."""
+    """Piano: 8 harmonics with per-harmonic decay, 3-voice unison detuning."""
     n = int(sr * duration)
     t = np.arange(n) / sr
     sig = np.zeros(n)
@@ -194,17 +205,21 @@ def _synth_piano(freq: float, duration: float, sr: int,
     harmonic_amps = [1.0, 0.5, 0.35, 0.25, 0.15, 0.1, 0.06, 0.03]
     harmonic_decays = [2.0, 3.0, 4.0, 5.0, 7.0, 9.0, 11.0, 14.0]
 
-    for k, (amp, decay_rate) in enumerate(zip(harmonic_amps, harmonic_decays), start=1):
-        # Slight chorus detuning (±2 cents on odd harmonics)
-        detune = 1.0
-        if k % 2 == 1 and k > 1:
-            detune = 2.0 ** (2.0 / 1200.0)
-        sig += amp * np.sin(2 * np.pi * freq * k * detune * t) * np.exp(-decay_rate * 0.3 * t)
+    # 3-voice unison detuning for thickness
+    detune_cents = [-4, 0, 4]
+    for dc in detune_cents:
+        f_det = freq * (2.0 ** (dc / 1200.0))
+        for k, (amp, decay_rate) in enumerate(zip(harmonic_amps, harmonic_decays), start=1):
+            sig += amp * np.sin(2 * np.pi * f_det * k * t) * np.exp(-decay_rate * 0.3 * t)
+    sig /= len(detune_cents)
 
     # Velocity-sensitive brightness: higher cutoff_scale = brighter
     cutoff = min(freq * 8 * cutoff_scale, sr / 2 - 100)
     if cutoff > 100:
         sig = _lowpass(sig, cutoff, sr)
+
+    # Remove sub-bass mud
+    sig = _highpass(sig, 80, sr)
 
     env = _adsr(n, sr, attack=0.003, decay=0.15, sustain=0.35, release=0.15)
     return sig * env
@@ -212,14 +227,20 @@ def _synth_piano(freq: float, duration: float, sr: int,
 
 def _synth_flute(freq: float, duration: float, sr: int,
                  cutoff_scale: float = 1.0) -> np.ndarray:
-    """Flute: sine with vibrato LFO + filtered breath noise."""
+    """Flute: sine with vibrato LFO, 2-voice detuning, filtered breath noise."""
     n = int(sr * duration)
     t = np.arange(n) / sr
 
     # Vibrato: 5Hz, increasing depth over time
     vibrato_depth = 0.003 * np.minimum(t / 0.3, 1.0)  # Ramp up over 300ms
     vibrato = vibrato_depth * np.sin(2 * np.pi * 5.0 * t)
+
+    # Main voice + 2 detuned voices for warmth
     sig = np.sin(2 * np.pi * freq * (1.0 + vibrato) * t) * 0.8
+    for dc in [-3, 3]:
+        f_det = freq * (2.0 ** (dc / 1200.0))
+        sig += np.sin(2 * np.pi * f_det * (1.0 + vibrato) * t) * 0.25
+    sig *= 0.6  # Normalize for added voices
 
     # Filtered breath noise with shaped envelope
     rng = np.random.default_rng(42)
@@ -230,17 +251,25 @@ def _synth_flute(freq: float, duration: float, sr: int,
         noise = _lowpass(noise, cutoff, sr)
     sig += noise * breath_env
 
+    # Remove low-end mud
+    sig = _highpass(sig, 200, sr)
+
     env = _adsr(n, sr, attack=0.05, decay=0.05, sustain=0.6, release=0.12)
     return sig * env
 
 
 def _synth_brass(freq: float, duration: float, sr: int,
                  cutoff_scale: float = 1.0) -> np.ndarray:
-    """Brass: sawtooth through resonant LP with filter envelope."""
+    """Brass: 3-voice detuned sawtooth through resonant LP with filter envelope."""
     n = int(sr * duration)
     t = np.arange(n) / sr
 
-    sig = _sawtooth(freq, duration, sr) * 0.5
+    # 3-voice unison for thick brass section sound
+    sig = np.zeros(n)
+    for dc in [-5, 0, 5]:
+        f_det = freq * (2.0 ** (dc / 1200.0))
+        sig += _sawtooth(f_det, duration, sr)
+    sig *= 0.5 / 3
 
     # Filter envelope: opens on attack, then settles
     filter_env = _adsr(n, sr, attack=0.05, decay=0.2, sustain=0.4, release=0.1)
@@ -259,18 +288,25 @@ def _synth_brass(freq: float, duration: float, sr: int,
             filtered[start:end], zi = _lowpass_stateful(sig[start:end], cutoff, sr, zi=zi)
         sig = filtered
 
+    # Remove sub-bass mud
+    sig = _highpass(sig, 80, sr)
+
     env = _adsr(n, sr, attack=0.03, decay=0.1, sustain=0.5, release=0.08)
     return sig * env
 
 
 def _synth_bass(freq: float, duration: float, sr: int,
                 cutoff_scale: float = 1.0) -> np.ndarray:
-    """Bass: filtered saw + sub sine + 2nd harmonic, with warm saturation."""
+    """Bass: 3-voice detuned saw + sub sine + 2nd harmonic, with warm saturation."""
     n = int(sr * duration)
     t = np.arange(n) / sr
 
-    # Band-limited sawtooth
-    saw = _sawtooth(freq, duration, sr) * 0.30
+    # 3-voice detuned band-limited sawtooth for thickness
+    saw = np.zeros(n)
+    for dc in [-4, 0, 4]:
+        f_det = freq * (2.0 ** (dc / 1200.0))
+        saw += _sawtooth(f_det, duration, sr)
+    saw *= 0.30 / 3
     # Sub-oscillator at root frequency (not freq/2 which is often sub-audible)
     sub = _sine(freq, duration, sr) * 0.40
     # 2nd harmonic sine for body
@@ -299,6 +335,9 @@ def _synth_bass(freq: float, duration: float, sr: int,
                 sig[start:end], cutoff, sr, zi=zi, order=3)
         sig = filtered
 
+    # Remove DC/sub rumble
+    sig = _highpass(sig, 30, sr)
+
     env = _adsr(n, sr, attack=0.005, decay=0.06, sustain=0.55, release=0.05)
     out = sig * env
     return out[:n]
@@ -321,21 +360,33 @@ def _synth_bell(freq: float, duration: float, sr: int,
     for ratio, amp, decay in [(2.76, 0.3, 2.0), (5.4, 0.15, 4.0), (8.93, 0.08, 6.0)]:
         sig += amp * np.sin(2 * np.pi * freq * ratio * t) * np.exp(-decay * t)
 
+    sig = _highpass(sig, 100, sr)
+
     env = _adsr(n, sr, attack=0.001, decay=0.4, sustain=0.05, release=0.4)
     return sig * env
 
 
 def _synth_pad(freq: float, duration: float, sr: int,
                cutoff_scale: float = 1.0) -> np.ndarray:
-    """Pad: 7 detuned saws (supersaw) through LP filter with slow LFO sweep."""
+    """Pad: 7 detuned saws (supersaw) spread across stereo, LP with slow LFO.
+
+    Returns stereo (N, 2) array with voices panned across the stereo field.
+    """
     n = int(sr * duration)
     t = np.arange(n) / sr
 
     detune_cents = [-12, -7, -3, 0, 3, 7, 12]
-    sig = np.zeros(n)
-    for dc in detune_cents:
+    # Spread voices across stereo field
+    voice_pans = [-0.7, -0.4, -0.15, 0.0, 0.15, 0.4, 0.7]
+    left = np.zeros(n)
+    right = np.zeros(n)
+    voice_amp = 0.2 / len(detune_cents) * 2
+    for dc, pan in zip(detune_cents, voice_pans):
         f = freq * (2.0 ** (dc / 1200.0))
-        sig += _sawtooth(f, duration, sr) * (0.2 / len(detune_cents) * 2)
+        voice = _sawtooth(f, duration, sr) * voice_amp
+        angle = (pan + 1.0) * np.pi / 4.0
+        left += voice * np.cos(angle)
+        right += voice * np.sin(angle)
 
     # Slow LFO filter sweep (stateful filtering for continuity)
     lfo = 0.5 + 0.5 * np.sin(2 * np.pi * 0.2 * t)  # 0.2 Hz LFO
@@ -343,18 +394,21 @@ def _synth_pad(freq: float, duration: float, sr: int,
     max_cutoff = min(freq * 6 * cutoff_scale, sr / 2 - 100)
     if max_cutoff > 100:
         block_size = sr // 10  # 100ms blocks
-        filtered = np.zeros(n)
-        zi = None
+        zi_l = zi_r = None
         for start in range(0, n, block_size):
             end = min(start + block_size, n)
             lfo_val = np.mean(lfo[start:end])
             cutoff = base_cutoff + (max_cutoff - base_cutoff) * lfo_val
             cutoff = max(100, min(cutoff, sr / 2 - 100))
-            filtered[start:end], zi = _lowpass_stateful(sig[start:end], cutoff, sr, zi=zi)
-        sig = filtered
+            left[start:end], zi_l = _lowpass_stateful(left[start:end], cutoff, sr, zi=zi_l)
+            right[start:end], zi_r = _lowpass_stateful(right[start:end], cutoff, sr, zi=zi_r)
+
+    # Remove sub-bass mud
+    left = _highpass(left, 60, sr)
+    right = _highpass(right, 60, sr)
 
     env = _adsr(n, sr, attack=0.3, decay=0.15, sustain=0.75, release=0.4)
-    return sig * env
+    return np.column_stack([left * env, right * env])
 
 
 def _synth_celesta(freq: float, duration: float, sr: int,
@@ -371,6 +425,8 @@ def _synth_celesta(freq: float, duration: float, sr: int,
 
     sig = np.sin(2 * np.pi * freq * t + mod1 + mod2)
     sig += 0.2 * np.sin(2 * np.pi * freq * 3 * t) * np.exp(-7.0 * t)
+
+    sig = _highpass(sig, 100, sr)
 
     env = _adsr(n, sr, attack=0.001, decay=0.2, sustain=0.15, release=0.2)
     return sig * env
@@ -397,6 +453,8 @@ def _synth_marimba(freq: float, duration: float, sr: int,
     if cutoff > 100:
         click = _lowpass(click, cutoff, sr)
     sig += click * click_env
+
+    sig = _highpass(sig, 60, sr)
 
     return sig
 
@@ -516,13 +574,19 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
         if start_sample >= total_samples or dur_sec <= 0:
             continue
 
-        # Humanization: timing jitter (±10ms scaled by swing)
-        jitter_samples = int(rng.uniform(-0.010, 0.010) * sr * (swing / 0.3 if swing > 0 else 0.1))
+        # Humanization: timing jitter (±25ms scaled by swing)
+        jitter_range = 0.025  # 25ms base
+        jitter_scale = swing / 0.3 if swing > 0 else 0.15
+        jitter_samples = int(rng.uniform(-jitter_range, jitter_range) * sr * jitter_scale)
         start_sample = max(0, start_sample + jitter_samples)
 
-        # Humanization: velocity variation (±5%)
-        vel_variation = rng.uniform(-0.05, 0.05)
+        # Humanization: velocity variation (±15%)
+        vel_variation = rng.uniform(-0.15, 0.15)
         velocity = max(1, min(127, int(note.velocity * (1.0 + vel_variation))))
+
+        # Humanization: note-length variation (±10%)
+        dur_sec *= 1.0 + rng.uniform(-0.10, 0.10)
+        dur_sec = max(0.01, dur_sec)
 
         # Synthesize
         if is_perc:
@@ -531,35 +595,45 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
             freq = _midi_to_freq(note.pitch)
             sig = synth_fn(freq, dur_sec, sr, cutoff_scale=cutoff_scale)
 
-        # Per-note effects
+        # Detect stereo instrument returns (e.g. pad)
+        is_stereo_sig = sig.ndim == 2 and sig.shape[1] == 2
+        if is_stereo_sig:
+            channels = [sig[:, 0].copy(), sig[:, 1].copy()]
+        else:
+            channels = [sig]
+
+        # Per-note effects (applied to each channel)
         effects = note.effects
-        if effects.get("vibrato"):
-            from chemsymphony.synthesis.effects import apply_vibrato
-            sig = apply_vibrato(sig, sr, rate=5.0, depth=0.003)
+        for ci in range(len(channels)):
+            ch = channels[ci]
 
-        if effects.get("pitch_bend"):
-            # Slight pitch bend up: stretch signal slightly
-            bend_amount = 1.02  # 2% up
-            n_bent = int(len(sig) / bend_amount)
-            if n_bent > 0:
-                fractional_indices = np.linspace(0, len(sig) - 1, n_bent)
-                sig = np.interp(fractional_indices, np.arange(len(sig)), sig)
+            if effects.get("vibrato"):
+                from chemsymphony.synthesis.effects import apply_vibrato
+                ch = apply_vibrato(ch, sr, rate=5.0, depth=0.003)
 
-        # Micro-fades (2ms cosine) to prevent clicks at note boundaries
-        fade_samples = min(int(0.002 * sr), len(sig) // 2)
-        if fade_samples > 0:
-            fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, fade_samples)))
-            fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_samples)))
-            sig[:fade_samples] *= fade_in
-            sig[-fade_samples:] *= fade_out
+            if effects.get("pitch_bend"):
+                bend_amount = 1.02  # 2% up
+                n_bent = int(len(ch) / bend_amount)
+                if n_bent > 0:
+                    fractional_indices = np.linspace(0, len(ch) - 1, n_bent)
+                    ch = np.interp(fractional_indices, np.arange(len(ch)), ch)
 
-        # Analog warmth: soft saturation for molecules with bracket atoms
-        if analog_warmth > 0.1 and not is_perc:
-            sat_drive = 1.0 + analog_warmth * 2.0  # 1.0–3.0
-            sig = np.tanh(sig * sat_drive) / np.tanh(sat_drive)
+            # Micro-fades (2ms cosine) to prevent clicks at note boundaries
+            fade_samples = min(int(0.002 * sr), len(ch) // 2)
+            if fade_samples > 0:
+                fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, fade_samples)))
+                fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, fade_samples)))
+                ch[:fade_samples] *= fade_in
+                ch[-fade_samples:] *= fade_out
 
-        # Scale by velocity
-        sig = sig * (velocity / 127.0)
+            # Analog warmth: soft saturation for molecules with bracket atoms
+            if analog_warmth > 0.1 and not is_perc:
+                sat_drive = 1.0 + analog_warmth * 2.0  # 1.0–3.0
+                ch = np.tanh(ch * sat_drive) / np.tanh(sat_drive)
+
+            # Scale by velocity
+            ch = ch * (velocity / 127.0)
+            channels[ci] = ch
 
         # Apply constant-power panning
         pan = max(-1.0, min(1.0, note.pan))
@@ -568,11 +642,20 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
         r_gain = np.sin(angle)
 
         # Place into stereo buffer
-        end_sample = min(start_sample + len(sig), total_samples)
-        length = end_sample - start_sample
-        if length > 0 and start_sample >= 0:
-            left[start_sample:end_sample] += sig[:length] * l_gain
-            right[start_sample:end_sample] += sig[:length] * r_gain
+        if is_stereo_sig:
+            sig_l, sig_r = channels[0], channels[1]
+            end_sample = min(start_sample + len(sig_l), total_samples)
+            length = end_sample - start_sample
+            if length > 0 and start_sample >= 0:
+                left[start_sample:end_sample] += sig_l[:length] * l_gain
+                right[start_sample:end_sample] += sig_r[:length] * r_gain
+        else:
+            sig_mono = channels[0]
+            end_sample = min(start_sample + len(sig_mono), total_samples)
+            length = end_sample - start_sample
+            if length > 0 and start_sample >= 0:
+                left[start_sample:end_sample] += sig_mono[:length] * l_gain
+                right[start_sample:end_sample] += sig_mono[:length] * r_gain
 
     # Per-layer delay for melody/motifs on symmetric molecules
     symmetry = ap.get("_symmetry_score", 0.0)

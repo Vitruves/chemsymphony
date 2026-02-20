@@ -20,10 +20,14 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=RichHelpFormatter,
     )
 
-    # Required
+    # Required (unless --list-genres)
     parser.add_argument(
-        "-s", "--smiles", required=True,
+        "-s", "--smiles", default=None,
         help="Input SMILES string",
+    )
+    parser.add_argument(
+        "--list-genres", action="store_true",
+        help="List available genre profiles for --post-processing and exit",
     )
 
     # Output options
@@ -56,6 +60,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--seed", type=int, default=None,
         help="Random seed for reproducibility",
     )
+    tuning_group.add_argument(
+        "--post-processing", default=None, metavar="GENRE",
+        help="Apply genre-specific audio styling (e.g. techno, ambient, gabber)",
+    )
 
     # Verbosity
     verb_group = parser.add_argument_group("verbosity")
@@ -85,7 +93,40 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    cfg = load_config(bpm=args.bpm, duration=args.duration, key=args.key, seed=args.seed)
+    # --list-genres: print available genres and exit
+    if args.list_genres:
+        from chemsymphony.genres import list_genres, load_genre
+        genres = list_genres()
+        if not genres:
+            print("No genres found.")
+        else:
+            print("Available genres for --post-processing:\n")
+            for name in genres:
+                profile = load_genre(name)
+                bpm = f"{profile.bpm_range[0]}-{profile.bpm_range[1]} BPM" if profile.bpm_range else "any BPM"
+                print(f"  {name:20s} {profile.name:20s} {bpm}")
+        return
+
+    # --smiles is required for generation
+    if args.smiles is None:
+        parser.error("the following arguments are required: -s/--smiles")
+
+    # Validate genre name if provided
+    if args.post_processing is not None:
+        from chemsymphony.genres import list_genres, load_genre
+        available = list_genres()
+        if args.post_processing not in available:
+            print(
+                f"Error: unknown genre {args.post_processing!r}. "
+                f"Available: {', '.join(available)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    cfg = load_config(
+        bpm=args.bpm, duration=args.duration, key=args.key,
+        seed=args.seed, post_processing=args.post_processing,
+    )
     cs = ChemSymphony(config=cfg)
 
     try:

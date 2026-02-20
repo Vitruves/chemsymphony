@@ -63,11 +63,22 @@ class ChemSymphony:
         if seed is not None:
             cfg.seed = seed
 
+        # Load genre profile if post-processing is requested
+        genre_profile = None
+        if cfg.post_processing:
+            from chemsymphony.genres import load_genre, apply_genre_preprocess
+            genre_profile = load_genre(cfg.post_processing)
+            apply_genre_preprocess(genre_profile, cfg)
+
         result = canonicalize(smiles)
         feat = extract_all_features(result.mol, result.canonical_smiles)
 
         from chemsymphony.mapping.master import apply_master_mapping
         apply_master_mapping(feat, cfg)
+
+        # Apply swing override from genre after master mapping sets audio_parameters
+        if genre_profile and hasattr(cfg, "_genre_swing_override"):
+            feat.audio_parameters["swing"] = cfg._genre_swing_override
 
         from chemsymphony.mapping import generate_all_layers
         layers = generate_all_layers(feat, cfg)
@@ -88,6 +99,15 @@ class ChemSymphony:
             from chemsymphony.export.audio_export import export_audio
             raw_layers = synthesize_audio(layers, feat, cfg)
             mixed = mix_layers(raw_layers, feat, cfg)
+
+            # Apply genre post-processing
+            if genre_profile:
+                from chemsymphony.genres import apply_genre_postprocess
+                bpm = feat.audio_parameters["bpm"]
+                mixed = apply_genre_postprocess(
+                    mixed, genre_profile, cfg.audio_sample_rate, bpm,
+                )
+
             return export_audio(mixed, fmt=fmt, config=cfg)
 
     def generate_to_file(

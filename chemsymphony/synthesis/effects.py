@@ -58,44 +58,69 @@ def _allpass_filter(audio: np.ndarray, delay_samples: int,
 
 
 def apply_reverb(audio: np.ndarray, sr: int, depth: float = 0.3,
-                 predelay_ms: float = 20.0, damping: float = 0.3) -> np.ndarray:
-    """Schroeder reverb: parallel comb filters → series allpass filters.
+                 predelay_ms: float = 20.0, damping: float = 0.3,
+                 decay_time: float = 1.5) -> np.ndarray:
+    """Schroeder reverb with early reflections and decay-time control.
 
-    Vectorized implementation — ~100x faster than sample-by-sample.
+    Parameters
+    ----------
+    depth : wet/dry mix (0–1)
+    predelay_ms : initial delay before reverb onset
+    damping : high-frequency absorption in feedback (0–1)
+    decay_time : approximate RT60 in seconds (controls comb-filter gains)
     """
     if depth <= 0:
         return audio
 
     depth = min(1.0, depth)
+    n = len(audio)
 
     # Pre-delay
     predelay_samples = int(predelay_ms * sr / 1000)
-    if 0 < predelay_samples < len(audio):
+    if 0 < predelay_samples < n:
         delayed = np.zeros_like(audio)
         delayed[predelay_samples:] = audio[:-predelay_samples]
     else:
         delayed = audio
 
-    # Parallel comb filter bank (Schroeder design)
-    comb_params = [
-        (int(29.7 * sr / 1000), 0.805),
-        (int(37.1 * sr / 1000), 0.827),
-        (int(41.1 * sr / 1000), 0.783),
-        (int(43.7 * sr / 1000), 0.764),
+    # --- Early reflections (tapped delay line at prime-based intervals) ---
+    er_taps = [
+        (int(7.0 * sr / 1000), 0.75),
+        (int(11.0 * sr / 1000), 0.65),
+        (int(19.0 * sr / 1000), 0.55),
+        (int(23.0 * sr / 1000), 0.45),
+        (int(31.0 * sr / 1000), 0.35),
+        (int(41.0 * sr / 1000), 0.28),
+        (int(47.0 * sr / 1000), 0.22),
+        (int(59.0 * sr / 1000), 0.15),
     ]
+    early_ref = np.zeros_like(delayed)
+    for delay_samp, er_gain in er_taps:
+        if 0 < delay_samp < n:
+            early_ref[delay_samp:] += delayed[:n - delay_samp] * er_gain
+    early_ref *= 0.25
 
+    # --- Late reverb: parallel comb filters with decay-time-scaled gains ---
+    comb_delays_ms = [29.7, 37.1, 41.1, 43.7]
     comb_sum = np.zeros_like(delayed)
-    for delay_samples, gain in comb_params:
+    for delay_ms in comb_delays_ms:
+        delay_samples = int(delay_ms * sr / 1000)
+        if delay_samples <= 0 or delay_samples >= n:
+            continue
+        # RT60 formula: gain = 10^(-3 * delay / (T60 * sr))
+        gain = 10.0 ** (-3.0 * delay_samples / (max(decay_time, 0.1) * sr))
+        gain = min(gain, 0.98)  # Stability guard
         comb_sum += _comb_filter_vectorized(delayed, delay_samples, gain, damping)
     comb_sum *= 0.25  # Average the four combs
 
-    # Series allpass filters (2 stages)
-    allpass_delays = [int(5.0 * sr / 1000), int(1.7 * sr / 1000)]
+    # --- Series allpass filters (3 stages for more diffusion) ---
+    allpass_delays = [int(5.0 * sr / 1000), int(1.7 * sr / 1000),
+                      int(3.3 * sr / 1000)]
     result = comb_sum
     for ap_delay in allpass_delays:
         result = _allpass_filter(result, ap_delay, gain=0.7)
 
-    return audio + result * depth
+    return audio + (early_ref + result) * depth
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +276,13 @@ def apply_delay(audio: np.ndarray, sr: int, bpm: float,
 # ---------------------------------------------------------------------------
 
 def fade_in_out(audio: np.ndarray, sr: int, fade_ms: float = 15.0) -> np.ndarray:
-    """Apply fade in/out to prevent clicks. Default 15ms."""
+    """Apply equal-power cosine fade in/out to prevent clicks. Default 15ms."""
     fade_samples = int(fade_ms * sr / 1000)
     fade_samples = min(fade_samples, len(audio) // 2)
     if fade_samples <= 0:
         return audio
     out = audio.copy()
-    out[:fade_samples] *= np.linspace(0, 1, fade_samples)
-    out[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+    t = np.linspace(0, 1, fade_samples)
+    out[:fade_samples] *= 0.5 * (1.0 - np.cos(np.pi * t))
+    out[-fade_samples:] *= 0.5 * (1.0 + np.cos(np.pi * t))
     return out

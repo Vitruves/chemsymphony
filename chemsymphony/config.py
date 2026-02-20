@@ -73,6 +73,7 @@ class Config:
     duration: float | None = None
     key: str | None = None
     seed: int | None = None
+    post_processing: str | None = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -100,6 +101,7 @@ def load_config(
     duration: float | None = None,
     key: str | None = None,
     seed: int | None = None,
+    post_processing: str | None = None,
 ) -> Config:
     """Load configuration with 3-level precedence.
 
@@ -133,5 +135,6 @@ def load_config(
         duration=duration,
         key=key,
         seed=seed,
+        post_processing=post_processing,
     )
     return cfg
