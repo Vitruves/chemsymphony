@@ -34,7 +34,7 @@ class ChemSymphony:
     def extract_features(self, smiles: str) -> MolecularFeatures:
         """Extract all molecular features without generating audio."""
         result = canonicalize(smiles)
-        feat = extract_all_features(result.mol)
+        feat = extract_all_features(result.mol, result.canonical_smiles)
         feat.molecular_formula = feat.molecular_formula or ""
 
         from chemsymphony.mapping.master import apply_master_mapping
@@ -64,7 +64,7 @@ class ChemSymphony:
             cfg.seed = seed
 
         result = canonicalize(smiles)
-        feat = extract_all_features(result.mol)
+        feat = extract_all_features(result.mol, result.canonical_smiles)
 
         from chemsymphony.mapping.master import apply_master_mapping
         apply_master_mapping(feat, cfg)

@@ -107,6 +107,34 @@ class MolecularFeatures:
     num_radical_electrons_total: int = 0
     hall_kier_alpha: float = 0.0
 
+    # SMILES string features (§14)
+    canonical_smiles: str = ""
+    smiles_entropy: float = 0.0
+    smiles_nesting_depth: int = 0
+    smiles_length_ratio: float = 0.0
+    bracket_atom_count: int = 0
+    max_ring_closure: int = 0
+    aromatic_char_ratio: float = 0.0
+    repeating_motif_count: int = 0
+    longest_repeating_motif: str = ""
+    special_char_density: float = 0.0
+    fragment_length_variance: float = 0.0
+
+    # Graph counting features (§15)
+    sp_count: int = 0
+    sp2_count: int = 0
+    sp3_count: int = 0
+    heteroatom_adjacency_count: int = 0
+    terminal_atom_count: int = 0
+    quaternary_center_count: int = 0
+    neighbor_pair_counts: dict[str, int] = field(default_factory=dict)
+    chain_to_ring_ratio: float = 0.0
+    max_same_element_run: int = 0
+    fg_diversity: int = 0
+    ring_size_variance: float = 0.0
+    en_variance: float = 0.0
+    has_macrocycle: bool = False
+
     # Derived audio parameters (set by master mapping)
     audio_parameters: dict[str, Any] = field(default_factory=dict)
 
@@ -248,6 +276,37 @@ class MolecularFeatures:
         kv("num_radical_electrons_total", self.num_radical_electrons_total)
         kv("hall_kier_alpha", f"{self.hall_kier_alpha:.3f}")
 
+        # SMILES string features
+        section("SMILES String Features")
+        kv("canonical_smiles", self.canonical_smiles)
+        kv("smiles_entropy", f"{self.smiles_entropy:.3f}")
+        kv("smiles_nesting_depth", self.smiles_nesting_depth)
+        kv("smiles_length_ratio", f"{self.smiles_length_ratio:.3f}")
+        kv("bracket_atom_count", self.bracket_atom_count)
+        kv("max_ring_closure", self.max_ring_closure)
+        kv("aromatic_char_ratio", f"{self.aromatic_char_ratio:.3f}")
+        kv("repeating_motif_count", self.repeating_motif_count)
+        if self.longest_repeating_motif:
+            kv("longest_repeating_motif", self.longest_repeating_motif)
+        kv("special_char_density", f"{self.special_char_density:.3f}")
+        kv("fragment_length_variance", f"{self.fragment_length_variance:.3f}")
+
+        # Graph counting features
+        section("Graph Counting Features")
+        kv("hybridization", f"sp={self.sp_count}, sp2={self.sp2_count}, sp3={self.sp3_count}")
+        kv("heteroatom_adjacency_count", self.heteroatom_adjacency_count)
+        kv("terminal_atom_count", self.terminal_atom_count)
+        kv("quaternary_center_count", self.quaternary_center_count)
+        if self.neighbor_pair_counts:
+            top_pairs = sorted(self.neighbor_pair_counts.items(), key=lambda x: -x[1])[:5]
+            kv("top_neighbor_pairs", {k: v for k, v in top_pairs})
+        kv("chain_to_ring_ratio", f"{self.chain_to_ring_ratio:.3f}")
+        kv("max_same_element_run", self.max_same_element_run)
+        kv("fg_diversity", self.fg_diversity)
+        kv("ring_size_variance", f"{self.ring_size_variance:.3f}")
+        kv("en_variance", f"{self.en_variance:.3f}")
+        kv("has_macrocycle", self.has_macrocycle)
+
         # Audio parameters
         ap = self.audio_parameters
         if ap:
@@ -271,8 +330,8 @@ class MolecularFeatures:
         return "\n".join(lines)
 
 
-def extract_all_features(mol: Chem.Mol) -> MolecularFeatures:
-    """Run all 12 feature extraction pipelines and return aggregated results."""
+def extract_all_features(mol: Chem.Mol, canonical_smiles: str = "") -> MolecularFeatures:
+    """Run all feature extraction pipelines and return aggregated results."""
     from chemsymphony.features.global_props import extract_global_props
     from chemsymphony.features.atoms import extract_atoms
     from chemsymphony.features.rings import extract_rings
@@ -286,6 +345,8 @@ def extract_all_features(mol: Chem.Mol) -> MolecularFeatures:
     from chemsymphony.features.distribution import extract_distribution
     from chemsymphony.features.electronic import extract_electronic
     from chemsymphony.features.physicochemical import extract_physicochemical
+    from chemsymphony.features.smiles_features import extract_smiles_features
+    from chemsymphony.features.graph_counting import extract_graph_counting
 
     feat = MolecularFeatures()
 
@@ -302,5 +363,12 @@ def extract_all_features(mol: Chem.Mol) -> MolecularFeatures:
     extract_distribution(mol, feat)
     extract_electronic(mol, feat)
     extract_physicochemical(mol, feat)
+
+    # SMILES string features (needs canonical SMILES + heavy_atom_count)
+    if canonical_smiles:
+        extract_smiles_features(canonical_smiles, feat)
+
+    # Graph counting features (needs rings, chains, functional_groups populated first)
+    extract_graph_counting(mol, feat)
 
     return feat

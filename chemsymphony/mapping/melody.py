@@ -36,6 +36,30 @@ class Layer:
     program: int = 0  # GM MIDI program number
 
 
+def _choose_melody_instrument(feat: MolecularFeatures) -> tuple[str, int]:
+    """Select melody instrument and GM program based on molecular character."""
+    n_count = feat.element_counts.get("N", 0)
+    o_count = feat.element_counts.get("O", 0)
+    arom = feat.aromatic_fraction
+    stereo = feat.stereo_center_count
+    fsp3 = feat.fsp3
+    logp = feat.logp
+
+    if arom > 0.3 and n_count >= 2:
+        return ("brass", 60)          # Bold, bright (e.g. LSD)
+    if arom > 0.3 and o_count >= 2:
+        return ("flute", 73)          # Airy (e.g. flavonoids)
+    if arom > 0.4:
+        return ("bell", 11)           # Shimmering
+    if stereo >= 4:
+        return ("celesta", 8)         # Crystalline
+    if fsp3 > 0.6 and logp > 3:
+        return ("marimba", 12)        # Warm, woody (e.g. cholesterol)
+    if fsp3 > 0.5:
+        return ("acoustic_piano", 0)  # Classic
+    return ("acoustic_piano", 0)
+
+
 def generate_melody(feat: MolecularFeatures, cfg: Config,
                     form: FormParams | None = None) -> Layer:
     """Generate the lead melody layer from the longest chain.
@@ -51,8 +75,11 @@ def generate_melody(feat: MolecularFeatures, cfg: Config,
     duration_sec = ap["duration"]
     chain_len = feat.longest_chain
 
+    instrument, program = _choose_melody_instrument(feat)
+
     if chain_len == 0:
-        return Layer(name="lead_melody", instrument="acoustic_piano", channel=0)
+        return Layer(name="lead_melody", instrument=instrument, channel=0,
+                     program=program)
 
     # New audio params
     harmonic_tension = ap.get("harmonic_tension", 0.0)
@@ -109,6 +136,11 @@ def generate_melody(feat: MolecularFeatures, cfg: Config,
         velocity = 90
         effects: dict = {}
 
+        # Ornament density: add trill effects on periodic notes
+        ornament_dens = ap.get("ornament_density", 0.0)
+        if ornament_dens > 0.3 and i % max(1, int(4 - 3 * ornament_dens)) == 0:
+            effects["trill"] = True
+
         if i < len(bond_orders):
             bond_order = bond_orders[i]
             if bond_order == 2:
@@ -149,8 +181,8 @@ def generate_melody(feat: MolecularFeatures, cfg: Config,
 
     return Layer(
         name="lead_melody",
-        instrument="acoustic_piano",
+        instrument=instrument,
         channel=0,
         notes=notes,
-        program=0,
+        program=program,
     )

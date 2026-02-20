@@ -51,21 +51,31 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
 
     for ring in feat.rings:
         idx = ring["index"]
-        size = min(ring["size"], 7)
+        size = ring["size"]
         heteroatoms = ring["heteroatoms"]
         is_aromatic = ring["is_aromatic"]
         is_fused = idx in fused_set
+        substituent_count = ring.get("substituent_count", 0)
 
         # Base pitch with octave offset for ring system
+        # Aromatic rings → higher register, saturated → lower
         octave_offset = ring_system_octave.get(idx, 0) * 12
-        base_pitch = max(24, min(60, root + octave_offset))
+        if is_aromatic:
+            base_pitch = max(30, min(54, root - 12 + octave_offset))
+        else:
+            base_pitch = max(24, min(48, root - 24 + octave_offset))
 
         # Ring-size-based pitch patterns
-        # 5-ring → minor 3rd intervals, 6-ring → perfect 5th, 7-ring → quartal
-        if size == 5:
+        if size == 3:
+            pitches = [base_pitch, base_pitch + 4, base_pitch + 7]  # Major triad (tension)
+        elif size == 4:
+            pitches = [base_pitch, base_pitch + 5, base_pitch, base_pitch + 5]  # Oscillating 4ths
+        elif size == 5:
             pitches = [base_pitch, base_pitch + 3]  # Minor 3rd
         elif size == 7:
             pitches = [base_pitch, base_pitch + 5]  # Quartal (perfect 4th)
+        elif size >= 8:
+            pitches = [base_pitch, base_pitch + 3, base_pitch + 7, base_pitch + 10]  # Minor 7th arpeggio
         else:
             pitches = [base_pitch, base_pitch + 7]  # Perfect 5th (default, incl 6-ring)
 
@@ -85,12 +95,21 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
         velocity_base = int(75 + filter_warmth * 30) if is_aromatic else int(90 + filter_warmth * 20)
         velocity_base = min(120, velocity_base)
 
+        # Syncopation: heavily substituted rings (>=3) skip beats
+        syncopated = substituent_count >= 3
+
         notes: list[NoteEvent] = []
         beat = 0.0
+        step_count = min(size, 7)  # Cap loop length
         while beat < beats_total:
-            for step in range(size):
+            for step in range(step_count):
                 if beat + step >= beats_total:
                     break
+
+                # Syncopated pattern: skip every other even step
+                if syncopated and step % 3 == 1:
+                    continue
+
                 pitch = pitches[step % len(pitches)]
 
                 # Apply swing to off-beat notes
@@ -107,7 +126,7 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
                 ))
 
                 # Ghost note between main hits for groove
-                if step < size - 1 and not is_aromatic:
+                if step < step_count - 1 and not is_aromatic:
                     ghost_beat = start_beat + 0.5
                     if ghost_beat < beats_total:
                         notes.append(NoteEvent(
@@ -118,7 +137,7 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
                             channel=1,
                         ))
 
-            beat += size
+            beat += step_count
 
         # Pan based on ring order
         total_rings = feat.ring_count

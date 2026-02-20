@@ -8,7 +8,7 @@ from scipy import signal as scipy_signal
 from chemsymphony.config import Config
 from chemsymphony.features import MolecularFeatures
 from chemsymphony.synthesis.effects import (
-    apply_reverb, apply_eq, apply_chorus, fade_in_out,
+    apply_reverb, apply_eq, apply_chorus, apply_delay, fade_in_out,
 )
 
 
@@ -181,9 +181,12 @@ def mix_layers(
     # Step 3: Global effects
     # Reverb — use reverb_wetness from audio params (falls back to aromatic count)
     reverb_depth = ap.get("reverb_wetness", min(1.0, feat.aromatic_atom_count / 20.0))
+    reverb_diffusion = ap.get("reverb_diffusion", 0.0)
+    # Diffusion increases damping (more diffuse = smoother tail)
+    reverb_damping = 0.3 + 0.4 * reverb_diffusion  # 0.3–0.7
     if reverb_depth > 0.05:
-        left = apply_reverb(left, sr, depth=reverb_depth)
-        right = apply_reverb(right, sr, depth=reverb_depth)
+        left = apply_reverb(left, sr, depth=reverb_depth, damping=reverb_damping)
+        right = apply_reverb(right, sr, depth=reverb_depth, damping=reverb_damping)
 
     # EQ from net charge
     brightness = 0.0
@@ -206,6 +209,23 @@ def mix_layers(
         chorus_mix = (timbre_organic - 0.4) * 0.5
         left = apply_chorus(left, sr, rate=0.8, depth=0.002, voices=2, mix=chorus_mix)
         right = apply_chorus(right, sr, rate=0.8, depth=0.002, voices=2, mix=chorus_mix)
+
+    # Echo density: terminal atoms → delay reflections
+    echo_density = ap.get("echo_density", 0.0)
+    if echo_density > 0.1:
+        delay_mix = echo_density * 0.2  # 0–0.2
+        delay_feedback = 0.2 + echo_density * 0.2  # 0.2–0.4
+        left = apply_delay(left, sr, bpm=ap["bpm"], subdivision=0.25,
+                           feedback=delay_feedback, mix=delay_mix)
+        right = apply_delay(right, sr, bpm=ap["bpm"], subdivision=0.375,
+                            feedback=delay_feedback, mix=delay_mix)
+
+    # Filter sweep: EN variance → slow filter modulation via EQ mid boost
+    filter_sweep = ap.get("filter_sweep", 0.0)
+    if filter_sweep > 0.1:
+        mid_boost = filter_sweep * 0.3  # 0–0.3 mid emphasis
+        left = apply_eq(left, sr, mid_boost=mid_boost)
+        right = apply_eq(right, sr, mid_boost=mid_boost)
 
     # Step 4: Normalize to -1 dBFS (0.89 peak)
     target_peak = 10.0 ** (-1.0 / 20.0)  # ~0.891

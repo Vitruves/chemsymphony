@@ -13,6 +13,7 @@ from chemsymphony.config import Config
 from chemsymphony.features import MolecularFeatures
 from chemsymphony.mapping import CompositionLayers
 from chemsymphony.mapping.melody import Layer, NoteEvent
+from chemsymphony.synthesis.effects import apply_delay
 
 # ---------------------------------------------------------------------------
 # PolyBLEP correction
@@ -438,6 +439,11 @@ _INSTRUMENT_MAP: dict[str, callable] = {
     "counter_melody": _synth_flute,
     "synth_pad": _synth_pad,
     "motifs": _synth_bell,
+    "brass": _synth_brass,
+    "flute": _synth_flute,
+    "bell": _synth_bell,
+    "celesta": _synth_celesta,
+    "marimba": _synth_marimba,
 }
 
 _PROGRAM_MAP: dict[int, callable] = {
@@ -490,6 +496,13 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
     filter_warmth = ap.get("filter_warmth", 0.5)
     cutoff_scale = 0.3 + 0.7 * (1.0 - filter_warmth)  # Warm = lower cutoff
 
+    # Waveform brightness: high sp/sp2 ratio → brighter oscillators (higher cutoff)
+    waveform_brightness = ap.get("waveform_brightness", 0.5)
+    cutoff_scale *= (0.7 + 0.6 * waveform_brightness)  # 0.7x–1.3x multiplier
+
+    # Analog warmth: bracket atoms → soft saturation drive
+    analog_warmth = ap.get("analog_warmth", 0.0)
+
     # Seeded RNG for reproducible humanization
     seed = ap.get("seed")
     rng = np.random.default_rng(seed if seed is not None else 42)
@@ -540,6 +553,11 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
             sig[:fade_samples] *= fade_in
             sig[-fade_samples:] *= fade_out
 
+        # Analog warmth: soft saturation for molecules with bracket atoms
+        if analog_warmth > 0.1 and not is_perc:
+            sat_drive = 1.0 + analog_warmth * 2.0  # 1.0–3.0
+            sig = np.tanh(sig * sat_drive) / np.tanh(sat_drive)
+
         # Scale by velocity
         sig = sig * (velocity / 127.0)
 
@@ -555,6 +573,16 @@ def synthesize_layer(layer: Layer, feat: MolecularFeatures,
         if length > 0 and start_sample >= 0:
             left[start_sample:end_sample] += sig[:length] * l_gain
             right[start_sample:end_sample] += sig[:length] * r_gain
+
+    # Per-layer delay for melody/motifs on symmetric molecules
+    symmetry = ap.get("_symmetry_score", 0.0)
+    if symmetry > 0.2 and layer.name in ("lead_melody", "motifs"):
+        delay_mix = 0.1 + 0.15 * symmetry
+        delay_feedback = 0.2 + 0.2 * symmetry
+        left = apply_delay(left, sr, bpm, subdivision=0.5,
+                           feedback=delay_feedback, mix=delay_mix)
+        right = apply_delay(right, sr, bpm, subdivision=0.5,
+                            feedback=delay_feedback, mix=delay_mix)
 
     return np.column_stack([left, right])
 

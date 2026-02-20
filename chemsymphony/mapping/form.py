@@ -18,20 +18,23 @@ class FormParams:
     section_count: int = 1
     is_palindrome: bool = False
     pause_positions: list[float] = field(default_factory=list)  # In beats
+    section_form: str = "through"  # "through", "aba", "abab"
 
 
 def generate_form(feat: MolecularFeatures, cfg: Config) -> FormParams:
     """Compute musical form parameters from graph topology."""
     form = FormParams()
 
-    # Diameter → octave range
+    # Diameter → octave range (finer granularity)
     d = feat.graph_diameter
-    if d <= 3:
+    if d <= 2:
         form.octave_range = 1
-    elif d <= 8:
+    elif d <= 5:
         form.octave_range = 2
-    else:
+    elif d <= 10:
         form.octave_range = 3
+    else:
+        form.octave_range = 4
 
     # Average degree → polyphony
     if feat.avg_degree < 2.0:
@@ -52,6 +55,14 @@ def generate_form(feat: MolecularFeatures, cfg: Config) -> FormParams:
 
     # Symmetry → palindrome
     form.is_palindrome = feat.symmetry_score > 0.3
+
+    # Section form based on symmetry
+    if feat.symmetry_score > 0.6:
+        form.section_form = "aba"
+    elif feat.symmetry_score > 0.3:
+        form.section_form = "abab"
+    else:
+        form.section_form = "through"
 
     # Bridges → pause positions (in beats)
     ap = feat.audio_parameters

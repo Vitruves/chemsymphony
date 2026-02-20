@@ -99,6 +99,43 @@ def _apply_form(layers: CompositionLayers, feat: MolecularFeatures, cfg: Config)
             ))
         layers.melody.notes.extend(mirrored)
 
+    # Section form application
+    if layers.melody.notes:
+        original = list(layers.melody.notes)
+        total_dur = max(n.start + n.duration for n in original) if original else 0
+        section_form = getattr(form, "section_form", "through")
+
+        if section_form == "aba" and total_dur > 0:
+            # Repeat first half transposed down an octave
+            half_dur = total_dur / 2
+            reprise = []
+            for note in original:
+                if note.start < half_dur:
+                    reprise.append(NoteEvent(
+                        pitch=max(36, note.pitch - 12),
+                        start=total_dur + note.start,
+                        duration=note.duration,
+                        velocity=max(40, note.velocity - 10),
+                        channel=note.channel,
+                        pan=note.pan,
+                        effects=dict(note.effects),
+                    ))
+            layers.melody.notes.extend(reprise)
+        elif section_form == "abab" and total_dur > 0:
+            # Repeat the entire melody
+            repeat = []
+            for note in original:
+                repeat.append(NoteEvent(
+                    pitch=note.pitch,
+                    start=total_dur + note.start,
+                    duration=note.duration,
+                    velocity=max(40, note.velocity - 15),
+                    channel=note.channel,
+                    pan=note.pan,
+                    effects=dict(note.effects),
+                ))
+            layers.melody.notes.extend(repeat)
+
 
 def _apply_expression(layers: CompositionLayers, feat: MolecularFeatures, cfg: Config) -> None:
     """Apply stereo and expression modifiers to all layers."""
