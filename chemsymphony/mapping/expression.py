@@ -32,7 +32,11 @@ class ExpressionParams:
 
 
 def generate_expression(feat: MolecularFeatures, cfg: Config) -> ExpressionParams:
-    """Compute expression parameters from stereochemistry and electronic features."""
+    """Compute expression parameters from stereochemistry and electronic features.
+
+    Now also uses reverb_wetness and filter_warmth from audio parameters.
+    """
+    ap = feat.audio_parameters
     expr = ExpressionParams()
 
     # §9: Stereo panning from chiral centers
@@ -58,6 +62,10 @@ def generate_expression(feat: MolecularFeatures, cfg: Config) -> ExpressionParam
     elif feat.net_charge < 0:
         expr.eq_brightness = max(-1.0, feat.net_charge * 0.3)
 
+    # Also factor in filter_warmth: warm → darker EQ
+    filter_warmth = ap.get("filter_warmth", 0.0)
+    expr.eq_brightness -= filter_warmth * 0.2
+
     # Charge accents
     for charge in feat.formal_charges:
         expr.charge_accents.append({
@@ -69,8 +77,12 @@ def generate_expression(feat: MolecularFeatures, cfg: Config) -> ExpressionParam
     # Radicals → noise positions
     expr.noise_bursts = list(feat.radical_electrons)
 
-    # Reverb from aromaticity
-    expr.reverb_depth = min(1.0, feat.aromatic_atom_count / 20.0)
+    # Reverb from reverb_wetness (driven by TPSA) or fallback to aromaticity
+    reverb_wetness = ap.get("reverb_wetness", None)
+    if reverb_wetness is not None:
+        expr.reverb_depth = reverb_wetness
+    else:
+        expr.reverb_depth = min(1.0, feat.aromatic_atom_count / 20.0)
 
     # Reverb pre-delay from Wiener index
     expr.reverb_predelay = min(100.0, feat.wiener_index / 100.0)

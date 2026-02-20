@@ -90,6 +90,10 @@ def _parse_key(key_str: str) -> tuple[int, str | None]:
     return root, mode
 
 
+def _clamp(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, val))
+
+
 def apply_master_mapping(feat: MolecularFeatures, cfg: Config) -> None:
     """Set audio_parameters on *feat* based on global molecular properties."""
     # BPM
@@ -114,6 +118,14 @@ def apply_master_mapping(feat: MolecularFeatures, cfg: Config) -> None:
     harmonic_dens = _harmonic_density(feat.unique_element_count)
     note_dens = _note_density(feat.total_bond_count, duration)
 
+    # §13 physicochemical → audio parameter derivations
+    filter_warmth = _clamp(feat.logp / 5.0, 0.0, 1.0)
+    reverb_wetness = _clamp(feat.tpsa / 140.0, 0.0, 1.0)
+    swing = _clamp(feat.rotatable_bond_count * 0.03, 0.0, 0.3)
+    timbre_organic = _clamp(feat.fsp3, 0.0, 1.0)
+    arrangement_density = _clamp(0.5 + feat.bertz_ct / 2000.0, 0.5, 1.5)
+    harmonic_tension = _clamp((feat.hbd_count + feat.hba_count) / 20.0, 0.0, 1.0)
+
     feat.audio_parameters = {
         "bpm": bpm,
         "duration": duration,
@@ -124,4 +136,10 @@ def apply_master_mapping(feat: MolecularFeatures, cfg: Config) -> None:
         "harmonic_density": harmonic_dens,
         "note_density": note_dens,
         "seed": cfg.seed,
+        "filter_warmth": filter_warmth,
+        "reverb_wetness": reverb_wetness,
+        "swing": swing,
+        "timbre_organic": timbre_organic,
+        "arrangement_density": arrangement_density,
+        "harmonic_tension": harmonic_tension,
     }

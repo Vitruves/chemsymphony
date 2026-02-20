@@ -95,6 +95,18 @@ class MolecularFeatures:
     electronegativity_gradient: list[float] = field(default_factory=list)
     radical_electrons: list[int] = field(default_factory=list)
 
+    # Physicochemical (§13)
+    logp: float = 0.0
+    tpsa: float = 0.0
+    rotatable_bond_count: int = 0
+    hbd_count: int = 0
+    hba_count: int = 0
+    fsp3: float = 0.0
+    bertz_ct: float = 0.0
+    num_valence_electrons: int = 0
+    num_radical_electrons_total: int = 0
+    hall_kier_alpha: float = 0.0
+
     # Derived audio parameters (set by master mapping)
     audio_parameters: dict[str, Any] = field(default_factory=dict)
 
@@ -223,6 +235,19 @@ class MolecularFeatures:
         if self.radical_electrons:
             kv("radical_electrons", self.radical_electrons)
 
+        # Physicochemical
+        section("Physicochemical Properties")
+        kv("logp", f"{self.logp:.3f}")
+        kv("tpsa", f"{self.tpsa:.2f}")
+        kv("rotatable_bond_count", self.rotatable_bond_count)
+        kv("hbd_count", self.hbd_count)
+        kv("hba_count", self.hba_count)
+        kv("fsp3", f"{self.fsp3:.3f}")
+        kv("bertz_ct", f"{self.bertz_ct:.2f}")
+        kv("num_valence_electrons", self.num_valence_electrons)
+        kv("num_radical_electrons_total", self.num_radical_electrons_total)
+        kv("hall_kier_alpha", f"{self.hall_kier_alpha:.3f}")
+
         # Audio parameters
         ap = self.audio_parameters
         if ap:
@@ -234,6 +259,12 @@ class MolecularFeatures:
             kv("scale_intervals", ap.get("scale_intervals"))
             kv("harmonic_density", ap.get("harmonic_density"))
             kv("note_density", f"{ap.get('note_density', 0):.2f}")
+            kv("filter_warmth", f"{ap.get('filter_warmth', 0):.3f}")
+            kv("reverb_wetness", f"{ap.get('reverb_wetness', 0):.3f}")
+            kv("swing", f"{ap.get('swing', 0):.3f}")
+            kv("timbre_organic", f"{ap.get('timbre_organic', 0):.3f}")
+            kv("arrangement_density", f"{ap.get('arrangement_density', 1.0):.3f}")
+            kv("harmonic_tension", f"{ap.get('harmonic_tension', 0):.3f}")
             if ap.get("seed") is not None:
                 kv("seed", ap["seed"])
 
@@ -254,6 +285,7 @@ def extract_all_features(mol: Chem.Mol) -> MolecularFeatures:
     from chemsymphony.features.topology import extract_topology
     from chemsymphony.features.distribution import extract_distribution
     from chemsymphony.features.electronic import extract_electronic
+    from chemsymphony.features.physicochemical import extract_physicochemical
 
     feat = MolecularFeatures()
 
@@ -269,5 +301,6 @@ def extract_all_features(mol: Chem.Mol) -> MolecularFeatures:
     extract_topology(mol, feat)
     extract_distribution(mol, feat)
     extract_electronic(mol, feat)
+    extract_physicochemical(mol, feat)
 
     return feat

@@ -148,3 +148,79 @@ class TestTopology:
     def test_salt_components(self):
         feat = extract_all_features(_mol("[Na+].[Cl-]"))
         assert feat.connected_components == 2
+
+
+class TestPhysicochemical:
+    """Tests for §13 physicochemical property extraction."""
+
+    def test_ethanol_logp(self):
+        feat = extract_all_features(_mol("CCO"))
+        # Ethanol is hydrophilic, LogP should be negative/low
+        assert feat.logp < 1.0
+
+    def test_benzene_logp(self):
+        feat = extract_all_features(_mol("c1ccccc1"))
+        # Benzene is hydrophobic, LogP > 1
+        assert feat.logp > 1.0
+
+    def test_ethanol_tpsa(self):
+        feat = extract_all_features(_mol("CCO"))
+        # Ethanol has an OH group, so TPSA > 0
+        assert feat.tpsa > 0
+
+    def test_hexane_tpsa(self):
+        feat = extract_all_features(_mol("CCCCCC"))
+        # Pure hydrocarbon: TPSA = 0
+        assert feat.tpsa == 0.0
+
+    def test_rotatable_bonds(self):
+        feat = extract_all_features(_mol("CCCCCC"))
+        # Hexane has rotatable bonds
+        assert feat.rotatable_bond_count >= 2
+
+    def test_methane_no_rotatable(self):
+        feat = extract_all_features(_mol("C"))
+        assert feat.rotatable_bond_count == 0
+
+    def test_fsp3_hexane(self):
+        feat = extract_all_features(_mol("CCCCCC"))
+        # All sp3 carbons
+        assert feat.fsp3 == 1.0
+
+    def test_fsp3_benzene(self):
+        feat = extract_all_features(_mol("c1ccccc1"))
+        # All sp2 carbons, no sp3
+        assert feat.fsp3 == 0.0
+
+    def test_bertz_ct_positive(self):
+        feat = extract_all_features(_mol("CCO"))
+        # Should be a positive complexity measure
+        assert feat.bertz_ct > 0
+
+    def test_hbd_hba_ethanol(self):
+        feat = extract_all_features(_mol("CCO"))
+        # Ethanol: 1 HBD (OH), 1 HBA (O)
+        assert feat.hbd_count >= 1
+        assert feat.hba_count >= 1
+
+    def test_valence_electrons(self):
+        feat = extract_all_features(_mol("CCO"))
+        # C2H6O: C(4)*2 + H(1)*6 + O(6) = 20
+        assert feat.num_valence_electrons == 20
+
+    def test_radical_electrons_zero(self):
+        feat = extract_all_features(_mol("CCO"))
+        assert feat.num_radical_electrons_total == 0
+
+    def test_hall_kier_alpha(self):
+        feat = extract_all_features(_mol("CCO"))
+        # Should return a numeric value
+        assert isinstance(feat.hall_kier_alpha, float)
+
+    def test_caffeine_properties(self):
+        """Caffeine: moderate complexity molecule."""
+        feat = extract_all_features(_mol("CN1C=NC2=C1C(=O)N(C(=O)N2C)C"))
+        assert feat.logp > -2.0
+        assert feat.tpsa > 30  # Multiple N and O atoms
+        assert feat.bertz_ct > 100  # Complex molecule
+        assert feat.hba_count >= 3  # Multiple N/O acceptors

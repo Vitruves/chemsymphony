@@ -20,7 +20,11 @@ _HETEROATOM_OFFSETS: dict[str, int] = {
 
 
 def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
-    """Generate bass loop layers — one per ring."""
+    """Generate bass loop layers — one per ring.
+
+    Uses swing for off-beat displacement, filter_warmth for velocity,
+    and adds ghost notes for groove.
+    """
     if feat.ring_count == 0:
         return []
 
@@ -29,6 +33,10 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
     bpm = ap["bpm"]
     duration_sec = ap["duration"]
     beats_total = (duration_sec / 60.0) * bpm
+
+    # New audio params
+    swing = ap.get("swing", 0.0)
+    filter_warmth = ap.get("filter_warmth", 0.5)
 
     fused_set = set()
     for i, j in feat.fused_ring_pairs:
@@ -46,7 +54,6 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
         size = min(ring["size"], 7)
         heteroatoms = ring["heteroatoms"]
         is_aromatic = ring["is_aromatic"]
-        sub_count = ring["substituent_count"]
 
         # Base pitch with octave offset for ring system
         octave_offset = ring_system_octave.get(idx, 0) * 12
@@ -58,26 +65,46 @@ def generate_bass(feat: MolecularFeatures, cfg: Config) -> list[Layer]:
             offset = _HETEROATOM_OFFSETS.get(ha, 2)
             pitches.append(base_pitch + offset)
 
-        # Generate loop notes, repeating to fill duration
-        loop_beats = size
-        note_dur = 1.0 if is_aromatic else 0.5  # Legato vs staccato
-        velocity_base = 80 if is_aromatic else 95
+        # Note duration and velocity based on ring character
+        note_dur = 1.0 if is_aromatic else 0.5
+        # Warmer filter = louder bass
+        velocity_base = int(75 + filter_warmth * 30) if is_aromatic else int(90 + filter_warmth * 20)
+        velocity_base = min(120, velocity_base)
 
         notes: list[NoteEvent] = []
         beat = 0.0
         while beat < beats_total:
-            for step in range(loop_beats):
+            for step in range(size):
                 if beat + step >= beats_total:
                     break
                 pitch = pitches[step % len(pitches)]
+
+                # Apply swing to off-beat notes
+                start_beat = beat + step
+                if swing > 0 and step % 2 == 1:
+                    start_beat += swing * note_dur
+
                 notes.append(NoteEvent(
                     pitch=pitch,
-                    start=beat + step,
+                    start=start_beat,
                     duration=note_dur,
                     velocity=velocity_base,
                     channel=1,
                 ))
-            beat += loop_beats
+
+                # Ghost note between main hits for groove
+                if step < size - 1 and not is_aromatic:
+                    ghost_beat = start_beat + 0.5
+                    if ghost_beat < beats_total:
+                        notes.append(NoteEvent(
+                            pitch=pitch,
+                            start=ghost_beat,
+                            duration=0.25,
+                            velocity=max(30, velocity_base - 40),
+                            channel=1,
+                        ))
+
+            beat += size
 
         # Pan based on ring order
         total_rings = feat.ring_count

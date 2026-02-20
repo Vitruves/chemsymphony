@@ -33,7 +33,11 @@ class Layer:
 
 
 def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
-    """Generate the lead melody layer from the longest chain."""
+    """Generate the lead melody layer from the longest chain.
+
+    Uses harmonic_tension for chromatic passing tones, swing for rhythmic
+    displacement, and a velocity contour (crescendo → diminuendo).
+    """
     ap = feat.audio_parameters
     root = ap["root_note_midi"]
     scale = ap["scale_intervals"]
@@ -43,6 +47,10 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
 
     if chain_len == 0:
         return Layer(name="lead_melody", instrument="acoustic_piano", channel=0)
+
+    # New audio params
+    harmonic_tension = ap.get("harmonic_tension", 0.0)
+    swing = ap.get("swing", 0.0)
 
     # Note duration: spread chain notes across the composition
     beats_total = (duration_sec / 60.0) * bpm
@@ -55,6 +63,9 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
     hetero_set = set(feat.chain_heteroatom_positions)
     bond_orders = feat.chain_bond_orders
 
+    # Climax position for velocity contour (from form params or default 0.6)
+    climax_pos = 0.6
+
     for i in range(chain_len):
         # At branch points, reverse direction
         chain_atom = feat.longest_chain_atoms[i] if i < len(feat.longest_chain_atoms) else i
@@ -62,9 +73,19 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
             direction *= -1
 
         # Compute pitch
+        is_chromatic = False
         if i in hetero_set:
             # Chromatic passing tone
             pitch = root + scale[scale_degree % len(scale)] + 1
+            is_chromatic = True
+        elif harmonic_tension > 0.3 and i % 4 == 3:
+            # Occasional chromatic passing tone based on harmonic tension
+            # Every 4th note gets chromaticism if tension is high enough
+            degree_in_scale = scale_degree % len(scale)
+            base_pitch = root + scale[degree_in_scale] + 12 * (scale_degree // len(scale))
+            # Approach from a semitone below
+            pitch = base_pitch - 1
+            is_chromatic = True
         else:
             octave = scale_degree // len(scale)
             degree_in_scale = scale_degree % len(scale)
@@ -80,19 +101,33 @@ def generate_melody(feat: MolecularFeatures, cfg: Config) -> Layer:
         if i < len(bond_orders):
             bond_order = bond_orders[i]
             if bond_order == 2:
-                # Double bond: staccato + accent
                 dur = note_dur * 0.5
                 velocity = 110
                 effects["pitch_bend"] = True
             elif bond_order == 3:
-                # Triple bond: sustained + vibrato
                 dur = note_dur * 2.0
                 velocity = 85
                 effects["vibrato"] = True
 
+        # Velocity contour: crescendo toward climax, diminuendo after
+        progress = i / max(chain_len - 1, 1)
+        if progress <= climax_pos:
+            # Crescendo: ramp from 0.7 to 1.0
+            contour = 0.7 + 0.3 * (progress / climax_pos)
+        else:
+            # Diminuendo: ramp from 1.0 to 0.6
+            contour = 1.0 - 0.4 * ((progress - climax_pos) / (1.0 - climax_pos))
+        velocity = max(40, min(127, int(velocity * contour)))
+
+        # Swing: displace off-beat notes
+        start_beat = i * note_dur
+        if swing > 0 and i % 2 == 1:
+            # Off-beat notes get displaced forward
+            start_beat += swing * note_dur
+
         notes.append(NoteEvent(
             pitch=pitch,
-            start=i * note_dur,
+            start=start_beat,
             duration=dur,
             velocity=velocity,
             channel=0,
